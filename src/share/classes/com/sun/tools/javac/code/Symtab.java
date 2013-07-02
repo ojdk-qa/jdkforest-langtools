@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -126,6 +126,7 @@ public class Symtab {
     public final Type stringBuilderType;
     public final Type cloneableType;
     public final Type serializableType;
+    public final Type serializedLambdaType;
     public final Type methodHandleType;
     public final Type methodHandleLookupType;
     public final Type methodTypeType;
@@ -147,6 +148,7 @@ public class Symtab {
     public final Type listType;
     public final Type collectionsType;
     public final Type comparableType;
+    public final Type comparatorType;
     public final Type arraysType;
     public final Type iterableType;
     public final Type iteratorType;
@@ -156,15 +158,16 @@ public class Symtab {
     public final Type deprecatedType;
     public final Type suppressWarningsType;
     public final Type inheritedType;
+    public final Type profileType;
     public final Type proprietaryType;
     public final Type systemType;
     public final Type autoCloseableType;
     public final Type trustMeType;
     public final Type lambdaMetafactory;
-    public final Type containedByType;
-    public final Type containerForType;
+    public final Type repeatableType;
     public final Type documentedType;
     public final Type elementTypeType;
+    public final Type functionalInterfaceType;
 
     /** The symbol representing the length field of an array.
      */
@@ -360,6 +363,22 @@ public class Symtab {
 
     }
 
+    // Enter a synthetic class that is used to mark classes in ct.sym.
+    // This class does not have a class file.
+    private Type enterSyntheticAnnotation(String name) {
+        ClassType type = (ClassType)enterClass(name);
+        ClassSymbol sym = (ClassSymbol)type.tsym;
+        sym.completer = null;
+        sym.flags_field = PUBLIC|ACYCLIC|ANNOTATION|INTERFACE;
+        sym.erasure_field = type;
+        sym.members_field = new Scope(sym);
+        type.typarams_field = List.nil();
+        type.allparams_field = List.nil();
+        type.supertype_field = annotationType;
+        type.interfaces_field = List.nil();
+        return type;
+    }
+
     /** Constructor; enters all predefined identifiers and operators
      *  into symbol table.
      */
@@ -458,6 +477,7 @@ public class Symtab {
         cloneableType = enterClass("java.lang.Cloneable");
         throwableType = enterClass("java.lang.Throwable");
         serializableType = enterClass("java.io.Serializable");
+        serializedLambdaType = enterClass("java.lang.invoke.SerializedLambda");
         methodHandleType = enterClass("java.lang.invoke.MethodHandle");
         methodHandleLookupType = enterClass("java.lang.invoke.MethodHandles$Lookup");
         methodTypeType = enterClass("java.lang.invoke.MethodType");
@@ -483,6 +503,7 @@ public class Symtab {
         listType = enterClass("java.util.List");
         collectionsType = enterClass("java.util.Collections");
         comparableType = enterClass("java.lang.Comparable");
+        comparatorType = enterClass("java.util.Comparator");
         arraysType = enterClass("java.util.Arrays");
         iterableType = target.hasIterable()
             ? enterClass("java.lang.Iterable")
@@ -494,8 +515,7 @@ public class Symtab {
         deprecatedType = enterClass("java.lang.Deprecated");
         suppressWarningsType = enterClass("java.lang.SuppressWarnings");
         inheritedType = enterClass("java.lang.annotation.Inherited");
-        containedByType = enterClass("java.lang.annotation.ContainedBy");
-        containerForType = enterClass("java.lang.annotation.ContainerFor");
+        repeatableType = enterClass("java.lang.annotation.Repeatable");
         documentedType = enterClass("java.lang.annotation.Documented");
         elementTypeType = enterClass("java.lang.annotation.ElementType");
         systemType = enterClass("java.lang.System");
@@ -509,11 +529,13 @@ public class Symtab {
         nativeHeaderType = enterClass("java.lang.annotation.Native");
         nativeHeaderType_old = enterClass("javax.tools.annotation.GenerateNativeHeader");
         lambdaMetafactory = enterClass("java.lang.invoke.LambdaMetafactory");
+        functionalInterfaceType = enterClass("java.lang.FunctionalInterface");
 
         synthesizeEmptyInterfaceIfMissing(autoCloseableType);
         synthesizeEmptyInterfaceIfMissing(cloneableType);
         synthesizeEmptyInterfaceIfMissing(serializableType);
         synthesizeEmptyInterfaceIfMissing(lambdaMetafactory);
+        synthesizeEmptyInterfaceIfMissing(serializedLambdaType);
         synthesizeBoxTypeIfMissing(doubleType);
         synthesizeBoxTypeIfMissing(floatType);
         synthesizeBoxTypeIfMissing(voidType);
@@ -521,17 +543,13 @@ public class Symtab {
         // Enter a synthetic class that is used to mark internal
         // proprietary classes in ct.sym.  This class does not have a
         // class file.
-        ClassType proprietaryType = (ClassType)enterClass("sun.Proprietary+Annotation");
-        this.proprietaryType = proprietaryType;
-        ClassSymbol proprietarySymbol = (ClassSymbol)proprietaryType.tsym;
-        proprietarySymbol.completer = null;
-        proprietarySymbol.flags_field = PUBLIC|ACYCLIC|ANNOTATION|INTERFACE;
-        proprietarySymbol.erasure_field = proprietaryType;
-        proprietarySymbol.members_field = new Scope(proprietarySymbol);
-        proprietaryType.typarams_field = List.nil();
-        proprietaryType.allparams_field = List.nil();
-        proprietaryType.supertype_field = annotationType;
-        proprietaryType.interfaces_field = List.nil();
+        proprietaryType = enterSyntheticAnnotation("sun.Proprietary+Annotation");
+
+        // Enter a synthetic class that is used to provide profile info for
+        // classes in ct.sym.  This class does not have a class file.
+        profileType = enterSyntheticAnnotation("jdk.Profile+Annotation");
+        MethodSymbol m = new MethodSymbol(PUBLIC | ABSTRACT, names.value, intType, profileType.tsym);
+        profileType.tsym.members().enter(m);
 
         // Enter a class for arrays.
         // The class implements java.lang.Cloneable and java.io.Serializable.

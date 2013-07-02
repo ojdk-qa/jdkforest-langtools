@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,12 +36,14 @@ import com.sun.source.tree.CompilationUnitTree;
  * @author Jonathan Gibbons
  * @since 1.6
  */
+@jdk.Supported
 public final class TaskEvent
 {
     /**
      * Kind of task event.
      * @since 1.6
      */
+    @jdk.Supported
     public enum Kind {
         /**
          * For events related to the parsing of a file.
@@ -60,7 +62,7 @@ public final class TaskEvent
          **/
         GENERATE,
         /**
-         * For events relating to overall annotaion processing.
+         * For events relating to overall annotation processing.
          **/
         ANNOTATION_PROCESSING,
         /**

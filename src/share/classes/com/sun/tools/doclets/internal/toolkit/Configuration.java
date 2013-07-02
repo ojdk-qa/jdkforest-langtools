@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,8 @@ import java.io.*;
 import java.util.*;
 
 import com.sun.javadoc.*;
+import com.sun.tools.javac.sym.Profiles;
+import com.sun.tools.javac.jvm.Profile;
 import com.sun.tools.doclets.internal.toolkit.builders.BuilderFactory;
 import com.sun.tools.doclets.internal.toolkit.taglets.*;
 import com.sun.tools.doclets.internal.toolkit.util.*;
@@ -50,6 +52,21 @@ import javax.tools.JavaFileManager;
  * @author Jamie Ho
  */
 public abstract class Configuration {
+
+    /**
+     * Exception used to report a problem during setOptions.
+     */
+    public static class Fault extends Exception {
+        private static final long serialVersionUID = 0;
+
+        Fault(String msg) {
+            super(msg);
+        }
+
+        Fault(String msg, Exception cause) {
+            super(msg, cause);
+        }
+    }
 
     /**
      * The factory for builders.
@@ -174,6 +191,12 @@ public abstract class Configuration {
     public boolean showauthor = false;
 
     /**
+     * Generate documentation for JavaFX getters and setters automatically
+     * by copying it from the appropriate property definition.
+     */
+    public boolean javafx = false;
+
+    /**
      * Generate version specific information for the all the classes
      * if @version tag is used in the doc comment and if -version option is
      * used. <code>showversion</code> is set to true if -version option is
@@ -186,6 +209,17 @@ public abstract class Configuration {
      *
      */
     public String sourcepath = "";
+
+    /**
+     * Argument for command line option "-Xprofilespath".
+     */
+    public String profilespath = "";
+
+    /**
+     * Generate profiles documentation if profilespath is set and valid profiles
+     * are present.
+     */
+    public boolean showProfiles = false;
 
     /**
      * Don't generate deprecated API information at all, if -nodeprecated
@@ -238,13 +272,23 @@ public abstract class Configuration {
      * @param options The array of option names and values.
      * @throws DocletAbortException
      */
-    public abstract void setSpecificDocletOptions(String[][] options);
+    public abstract void setSpecificDocletOptions(String[][] options) throws Fault;
 
     /**
      * Return the doclet specific {@link MessageRetriever}
      * @return the doclet specific MessageRetriever.
      */
     public abstract MessageRetriever getDocletSpecificMsg();
+
+    /**
+     * A profiles object used to access profiles across various pages.
+     */
+    public Profiles profiles;
+
+    /**
+     * An map of the profiles to packages.
+     */
+    public Map<String,PackageDoc[]> profilePackages;
 
     /**
      * An array of the packages specified on the command-line merged
@@ -294,6 +338,7 @@ public abstract class Configuration {
         option = option.toLowerCase();
         if (option.equals("-author") ||
             option.equals("-docfilessubdirs") ||
+            option.equals("-javafx") ||
             option.equals("-keywords") ||
             option.equals("-linksource") ||
             option.equals("-nocomment") ||
@@ -315,7 +360,8 @@ public abstract class Configuration {
                    option.equals("-sourcepath") ||
                    option.equals("-tag") ||
                    option.equals("-taglet") ||
-                   option.equals("-tagletpath")) {
+                   option.equals("-tagletpath") ||
+                   option.equals("-xprofilespath")) {
             return 2;
         } else if (option.equals("-group") ||
                    option.equals("-linkoffline")) {
@@ -334,6 +380,38 @@ public abstract class Configuration {
     public abstract boolean validOptions(String options[][],
         DocErrorReporter reporter);
 
+    private void initProfiles() throws IOException {
+        profiles = Profiles.read(new File(profilespath));
+        // Generate profiles documentation only is profilespath is set and if
+        // profiles is not null and profiles count is 1 or more.
+        showProfiles = (!profilespath.isEmpty() && profiles != null &&
+                profiles.getProfileCount() > 0);
+    }
+
+    private void initProfilePackages() throws IOException {
+        profilePackages = new HashMap<String,PackageDoc[]>();
+        ArrayList<PackageDoc> results;
+        Map<String,PackageDoc> packageIndex = new HashMap<String,PackageDoc>();
+        for (int i = 0; i < packages.length; i++) {
+            PackageDoc pkg = packages[i];
+            packageIndex.put(pkg.name(), pkg);
+        }
+        for (int i = 1; i < profiles.getProfileCount(); i++) {
+            Set<String> profPkgs = profiles.getPackages(i);
+            results = new ArrayList<PackageDoc>();
+            for (String packageName : profPkgs) {
+                packageName = packageName.replace("/", ".");
+                PackageDoc profPkg = packageIndex.get(packageName);
+                if (profPkg != null) {
+                    results.add(profPkg);
+                }
+            }
+            Collections.sort(results);
+            PackageDoc[] profilePkgs = results.toArray(new PackageDoc[]{});
+            profilePackages.put(Profile.lookup(i).name, profilePkgs);
+        }
+    }
+
     private void initPackageArray() {
         Set<PackageDoc> set = new HashSet<PackageDoc>(Arrays.asList(root.specifiedPackages()));
         ClassDoc[] classes = root.specifiedClasses();
@@ -350,15 +428,26 @@ public abstract class Configuration {
      *
      * @param options the two dimensional array of options.
      */
-    public void setOptions(String[][] options) {
+    public void setOptions(String[][] options) throws Fault {
         LinkedHashSet<String[]> customTagStrs = new LinkedHashSet<String[]>();
+
+        // Some options, specifically -link and -linkoffline, require that
+        // the output directory has already been created: so do that first.
         for (int oi = 0; oi < options.length; ++oi) {
             String[] os = options[oi];
             String opt = os[0].toLowerCase();
             if (opt.equals("-d")) {
                 destDirName = addTrailingFileSep(os[1]);
                 docFileDestDirName = destDirName;
-            } else if (opt.equals("-docfilessubdirs")) {
+                ensureOutputDirExists();
+                break;
+            }
+        }
+
+        for (int oi = 0; oi < options.length; ++oi) {
+            String[] os = options[oi];
+            String opt = os[0].toLowerCase();
+            if (opt.equals("-docfilessubdirs")) {
                 copydocfilesubdirs = true;
             } else if (opt.equals("-docencoding")) {
                 docencoding = os[1];
@@ -366,6 +455,8 @@ public abstract class Configuration {
                 encoding = os[1];
             } else if (opt.equals("-author")) {
                 showauthor = true;
+            } else  if (opt.equals("-javafx")) {
+                javafx = true;
             } else if (opt.equals("-nosince")) {
                 nosince = true;
             } else if (opt.equals("-version")) {
@@ -404,6 +495,8 @@ public abstract class Configuration {
                 customTagStrs.add(os);
             } else if (opt.equals("-tagletpath")) {
                 tagletpath = os[1];
+            }  else if (opt.equals("-xprofilespath")) {
+                profilespath = os[1];
             } else if (opt.equals("-keywords")) {
                 keywords = true;
             } else if (opt.equals("-serialwarn")) {
@@ -436,10 +529,35 @@ public abstract class Configuration {
      *
      * @throws DocletAbortException
      */
-    public void setOptions() {
+    public void setOptions() throws Fault {
         initPackageArray();
         setOptions(root.options());
+        if (!profilespath.isEmpty()) {
+            try {
+                initProfiles();
+                initProfilePackages();
+            } catch (Exception e) {
+                throw new DocletAbortException();
+            }
+        }
         setSpecificDocletOptions(root.options());
+    }
+
+    private void ensureOutputDirExists() throws Fault {
+        DocFile destDir = DocFile.createFileForDirectory(this, destDirName);
+        if (!destDir.exists()) {
+            //Create the output directory (in case it doesn't exist yet)
+            root.printNotice(getText("doclet.dest_dir_create", destDirName));
+            destDir.mkdirs();
+        } else if (!destDir.isDirectory()) {
+            throw new Fault(getText(
+                "doclet.destination_directory_not_directory_0",
+                destDir.getPath()));
+        } else if (!destDir.canWrite()) {
+            throw new Fault(getText(
+                "doclet.destination_directory_not_writable_0",
+                destDir.getPath()));
+        }
     }
 
 
@@ -451,7 +569,7 @@ public abstract class Configuration {
      */
     private void initTagletManager(Set<String[]> customTagStrs) {
         tagletManager = tagletManager == null ?
-            new TagletManager(nosince, showversion, showauthor, message) :
+            new TagletManager(nosince, showversion, showauthor, javafx, message) :
             tagletManager;
         String[] args;
         for (Iterator<String[]> it = customTagStrs.iterator(); it.hasNext(); ) {
@@ -575,26 +693,7 @@ public abstract class Configuration {
         for (int oi = 0; oi < options.length; oi++) {
             String[] os = options[oi];
             String opt = os[0].toLowerCase();
-            if (opt.equals("-d")) {
-                String destdirname = addTrailingFileSep(os[1]);
-                DocFile destDir = DocFile.createFileForDirectory(this, destdirname);
-                if (!destDir.exists()) {
-                    //Create the output directory (in case it doesn't exist yet)
-                    reporter.printNotice(getText("doclet.dest_dir_create",
-                        destdirname));
-                    destDir.mkdirs();
-                } else if (!destDir.isDirectory()) {
-                    reporter.printError(getText(
-                        "doclet.destination_directory_not_directory_0",
-                        destDir.getPath()));
-                    return false;
-                } else if (!destDir.canWrite()) {
-                    reporter.printError(getText(
-                        "doclet.destination_directory_not_writable_0",
-                        destDir.getPath()));
-                    return false;
-                }
-            } else if (opt.equals("-docencoding")) {
+            if (opt.equals("-docencoding")) {
                 docencodingfound = true;
                 if (!checkOutputFileEncoding(os[1], reporter)) {
                     return false;
@@ -781,4 +880,6 @@ public abstract class Configuration {
         sourcetab = n;
         tabSpaces = String.format("%" + n + "s", "");
     }
+
+    public abstract boolean showMessage(SourcePosition pos, String key);
 }

@@ -1,18 +1,16 @@
 /**
  * @test    /nodynamiccopyright/
- * @bug     7169362
+ * @bug     7169362 8001114
  * @author  sogoel
  * @summary ContainerAnnotation does not have FooContainer.class specified
  * @compile/fail/ref=MissingContainer.out -XDrawDiagnostics MissingContainer.java
  */
 
-import java.lang.annotation.ContainedBy;
-import java.lang.annotation.ContainerFor;
+import java.lang.annotation.Repeatable;
 
-@ContainedBy()
+@Repeatable()
 @interface Foo {}
 
-@ContainerFor(Foo.class)
 @interface FooContainer {
     Foo[] value();
 }

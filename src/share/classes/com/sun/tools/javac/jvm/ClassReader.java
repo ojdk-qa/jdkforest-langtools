@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -134,6 +134,11 @@ public class ClassReader implements Completer {
      **/
     public boolean preferSource;
 
+    /**
+     * The currently selected profile.
+     */
+    public final Profile profile;
+
     /** The log to use for verbose output
      */
     final Log log;
@@ -217,6 +222,13 @@ public class ClassReader implements Completer {
      */
     boolean haveParameterNameIndices;
 
+    /** Set this to false every time we start reading a method
+     * and are saving parameter names.  Set it to true when we see
+     * MethodParameters, if it's set when we see a LocalVariableTable,
+     * then we ignore the parameter names from the LVT.
+     */
+    boolean sawMethodParameters;
+
     /**
      * The set of attribute names for which warnings have been generated for the current class
      */
@@ -277,15 +289,19 @@ public class ClassReader implements Completer {
         annotate = Annotate.instance(context);
         verbose        = options.isSet(VERBOSE);
         checkClassFile = options.isSet("-checkclassfile");
+
         Source source = Source.instance(context);
         allowGenerics    = source.allowGenerics();
         allowVarargs     = source.allowVarargs();
         allowAnnotations = source.allowAnnotations();
         allowSimplifiedVarargs = source.allowSimplifiedVarargs();
         allowDefaultMethods = source.allowDefaultMethods();
+
         saveParameterNames = options.isSet("save-parameter-names");
         cacheCompletionFailure = options.isUnset("dev");
         preferSource = "source".equals(options.get("-Xprefer"));
+
+        profile = Profile.instance(context);
 
         completionFailureName =
             options.isSet("failcomplete")
@@ -302,7 +318,9 @@ public class ClassReader implements Completer {
     /** Add member to class unless it is synthetic.
      */
     private void enterMember(ClassSymbol c, Symbol sym) {
-        if ((sym.flags_field & (SYNTHETIC|BRIDGE)) != SYNTHETIC)
+        // Synthetic members are not entered -- reason lost to history (optimization?).
+        // Lambda methods must be entered because they may have inner classes (which reference them)
+        if ((sym.flags_field & (SYNTHETIC|BRIDGE)) != SYNTHETIC || sym.name.startsWith(names.lambda))
             c.members_field.enter(sym);
     }
 
@@ -344,8 +362,8 @@ public class ClassReader implements Completer {
 
     /** Read a byte.
      */
-    byte nextByte() {
-        return buf[bp++];
+    int nextByte() {
+        return buf[bp++] & 0xFF;
     }
 
     /** Read an integer.
@@ -984,7 +1002,7 @@ public class ClassReader implements Completer {
             new AttributeReader(names.LocalVariableTable, V45_3, CLASS_OR_MEMBER_ATTRIBUTE) {
                 protected void read(Symbol sym, int attrLen) {
                     int newbp = bp + attrLen;
-                    if (saveParameterNames) {
+                    if (saveParameterNames && !sawMethodParameters) {
                         // Pick up parameter names from the variable table.
                         // Parameter names are not explicitly identified as such,
                         // but all parameter name entries in the LocalVariableTable
@@ -1016,6 +1034,25 @@ public class ClassReader implements Completer {
                     bp = newbp;
                 }
             },
+
+            new AttributeReader(names.MethodParameters, V52, MEMBER_ATTRIBUTE) {
+                protected void read(Symbol sym, int attrlen) {
+                    int newbp = bp + attrlen;
+                    if (saveParameterNames) {
+                        sawMethodParameters = true;
+                        int numEntries = nextByte();
+                        parameterNameIndices = new int[numEntries];
+                        haveParameterNameIndices = true;
+                        for (int i = 0; i < numEntries; i++) {
+                            int nameIndex = nextChar();
+                            int flags = nextChar();
+                            parameterNameIndices[i] = nameIndex;
+                        }
+                    }
+                    bp = newbp;
+                }
+            },
+
 
             new AttributeReader(names.SourceFile, V45_3, CLASS_ATTRIBUTE) {
                 protected void read(Symbol sym, int attrLen) {
@@ -1145,6 +1182,19 @@ public class ClassReader implements Completer {
                         sym.flags_field |= VARARGS;
                 }
             },
+
+            new AttributeReader(names.RuntimeVisibleTypeAnnotations, V52, CLASS_OR_MEMBER_ATTRIBUTE) {
+                protected void read(Symbol sym, int attrLen) {
+                    attachTypeAnnotations(sym);
+                }
+            },
+
+            new AttributeReader(names.RuntimeInvisibleTypeAnnotations, V52, CLASS_OR_MEMBER_ATTRIBUTE) {
+                protected void read(Symbol sym, int attrLen) {
+                    attachTypeAnnotations(sym);
+                }
+            },
+
 
             // The following attributes for a Code attribute are not currently handled
             // StackMapTable
@@ -1331,7 +1381,18 @@ public class ClassReader implements Completer {
                 CompoundAnnotationProxy proxy = readCompoundAnnotation();
                 if (proxy.type.tsym == syms.proprietaryType.tsym)
                     sym.flags_field |= PROPRIETARY;
-                else
+                else if (proxy.type.tsym == syms.profileType.tsym) {
+                    if (profile != Profile.DEFAULT) {
+                        for (Pair<Name,Attribute> v: proxy.values) {
+                            if (v.fst == names.value && v.snd instanceof Attribute.Constant) {
+                                Attribute.Constant c = (Attribute.Constant) v.snd;
+                                if (c.type == syms.intType && ((Integer) c.value) > profile.value) {
+                                    sym.flags_field |= NOT_IN_PROFILE;
+                                }
+                            }
+                        }
+                    }
+                } else
                     proxies.append(proxy);
             }
             annotate.normal(new AnnotationCompleter(sym, proxies.toList()));
@@ -1352,6 +1413,17 @@ public class ClassReader implements Completer {
         }
         if (pnum != numParameters) {
             throw badClassFile("bad.runtime.invisible.param.annotations", meth);
+        }
+    }
+
+    void attachTypeAnnotations(final Symbol sym) {
+        int numAttributes = nextChar();
+        if (numAttributes != 0) {
+            ListBuffer<TypeAnnotationProxy> proxies =
+                ListBuffer.lb();
+            for (int i = 0; i < numAttributes; i++)
+                proxies.append(readTypeAnnotation());
+            annotate.normal(new TypeAnnotationCompleter(sym, proxies.toList()));
         }
     }
 
@@ -1399,6 +1471,111 @@ public class ClassReader implements Completer {
             pairs.append(new Pair<Name,Attribute>(name, value));
         }
         return new CompoundAnnotationProxy(t, pairs.toList());
+    }
+
+    TypeAnnotationProxy readTypeAnnotation() {
+        TypeAnnotationPosition position = readPosition();
+        CompoundAnnotationProxy proxy = readCompoundAnnotation();
+
+        return new TypeAnnotationProxy(proxy, position);
+    }
+
+    TypeAnnotationPosition readPosition() {
+        int tag = nextByte(); // TargetType tag is a byte
+
+        if (!TargetType.isValidTargetTypeValue(tag))
+            throw this.badClassFile("bad.type.annotation.value", String.format("0x%02X", tag));
+
+        TypeAnnotationPosition position = new TypeAnnotationPosition();
+        TargetType type = TargetType.fromTargetTypeValue(tag);
+
+        position.type = type;
+
+        switch (type) {
+        // instanceof
+        case INSTANCEOF:
+        // new expression
+        case NEW:
+        // constructor/method reference receiver
+        case CONSTRUCTOR_REFERENCE:
+        case METHOD_REFERENCE:
+            position.offset = nextChar();
+            break;
+        // local variable
+        case LOCAL_VARIABLE:
+        // resource variable
+        case RESOURCE_VARIABLE:
+            int table_length = nextChar();
+            position.lvarOffset = new int[table_length];
+            position.lvarLength = new int[table_length];
+            position.lvarIndex = new int[table_length];
+
+            for (int i = 0; i < table_length; ++i) {
+                position.lvarOffset[i] = nextChar();
+                position.lvarLength[i] = nextChar();
+                position.lvarIndex[i] = nextChar();
+            }
+            break;
+        // exception parameter
+        case EXCEPTION_PARAMETER:
+            position.exception_index = nextByte();
+            break;
+        // method receiver
+        case METHOD_RECEIVER:
+            // Do nothing
+            break;
+        // type parameter
+        case CLASS_TYPE_PARAMETER:
+        case METHOD_TYPE_PARAMETER:
+            position.parameter_index = nextByte();
+            break;
+        // type parameter bound
+        case CLASS_TYPE_PARAMETER_BOUND:
+        case METHOD_TYPE_PARAMETER_BOUND:
+            position.parameter_index = nextByte();
+            position.bound_index = nextByte();
+            break;
+        // class extends or implements clause
+        case CLASS_EXTENDS:
+            position.type_index = nextChar();
+            break;
+        // throws
+        case THROWS:
+            position.type_index = nextChar();
+            break;
+        // method parameter
+        case METHOD_FORMAL_PARAMETER:
+            position.parameter_index = nextByte();
+            break;
+        // type cast
+        case CAST:
+        // method/constructor/reference type argument
+        case CONSTRUCTOR_INVOCATION_TYPE_ARGUMENT:
+        case METHOD_INVOCATION_TYPE_ARGUMENT:
+        case CONSTRUCTOR_REFERENCE_TYPE_ARGUMENT:
+        case METHOD_REFERENCE_TYPE_ARGUMENT:
+            position.offset = nextChar();
+            position.type_index = nextByte();
+            break;
+        // We don't need to worry about these
+        case METHOD_RETURN:
+        case FIELD:
+            break;
+        case UNKNOWN:
+            throw new AssertionError("jvm.ClassReader: UNKNOWN target type should never occur!");
+        default:
+            throw new AssertionError("jvm.ClassReader: Unknown target type for position: " + position);
+        }
+
+        { // See whether there is location info and read it
+            int len = nextByte();
+            ListBuffer<Integer> loc = ListBuffer.lb();
+            for (int i = 0; i < len * TypeAnnotationPosition.TypePathEntry.bytesPerEntry; ++i)
+                loc = loc.append(nextByte());
+            position.location = TypeAnnotationPosition.getTypePathFromBinary(loc.toList());
+        }
+
+        return position;
     }
 
     Attribute readAttributeValue() {
@@ -1722,10 +1899,43 @@ public class ClassReader implements Completer {
                 Annotations annotations = sym.annotations;
                 List<Attribute.Compound> newList = deproxyCompoundList(l);
                 if (annotations.pendingCompletion()) {
-                    annotations.setAttributes(newList);
+                    annotations.setDeclarationAttributes(newList);
                 } else {
                     annotations.append(newList);
                 }
+            } finally {
+                currentClassFile = previousClassFile;
+            }
+        }
+    }
+
+    class TypeAnnotationCompleter extends AnnotationCompleter {
+
+        List<TypeAnnotationProxy> proxies;
+
+        TypeAnnotationCompleter(Symbol sym,
+                List<TypeAnnotationProxy> proxies) {
+            super(sym, List.<CompoundAnnotationProxy>nil());
+            this.proxies = proxies;
+        }
+
+        List<Attribute.TypeCompound> deproxyTypeCompoundList(List<TypeAnnotationProxy> proxies) {
+            ListBuffer<Attribute.TypeCompound> buf = ListBuffer.lb();
+            for (TypeAnnotationProxy proxy: proxies) {
+                Attribute.Compound compound = deproxyCompound(proxy.compound);
+                Attribute.TypeCompound typeCompound = new Attribute.TypeCompound(compound, proxy.position);
+                buf.add(typeCompound);
+            }
+            return buf.toList();
+        }
+
+        @Override
+        public void enterAnnotation() {
+            JavaFileObject previousClassFile = currentClassFile;
+            try {
+                currentClassFile = classFile;
+                List<Attribute.TypeCompound> newList = deproxyTypeCompoundList(proxies);
+                sym.annotations.setTypeAttributes(newList.prependList(sym.getRawTypeAttributes()));
             } finally {
                 currentClassFile = previousClassFile;
             }
@@ -1826,6 +2036,7 @@ public class ClassReader implements Completer {
         } else
             Arrays.fill(parameterNameIndices, 0);
         haveParameterNameIndices = false;
+        sawMethodParameters = false;
     }
 
     /**
@@ -1845,12 +2056,16 @@ public class ClassReader implements Completer {
         // if no names were found in the class file, there's nothing more to do
         if (!haveParameterNameIndices)
             return;
-
-        int firstParam = ((sym.flags() & STATIC) == 0) ? 1 : 0;
-        // the code in readMethod may have skipped the first parameter when
-        // setting up the MethodType. If so, we make a corresponding allowance
-        // here for the position of the first parameter.  Note that this
-        // assumes the skipped parameter has a width of 1 -- i.e. it is not
+        // If we get parameter names from MethodParameters, then we
+        // don't need to skip.
+        int firstParam = 0;
+        if (!sawMethodParameters) {
+            firstParam = ((sym.flags() & STATIC) == 0) ? 1 : 0;
+            // the code in readMethod may have skipped the first
+            // parameter when setting up the MethodType. If so, we
+            // make a corresponding allowance here for the position of
+            // the first parameter.  Note that this assumes the
+            // skipped parameter has a width of 1 -- i.e. it is not
         // a double width type (long or double.)
         if (sym.name == names.init && currentOwner.hasOuterInstance()) {
             // Sometimes anonymous classes don't have an outer
@@ -1861,16 +2076,19 @@ public class ClassReader implements Completer {
         }
 
         if (sym.type != jvmType) {
-            // reading the method attributes has caused the symbol's type to
-            // be changed. (i.e. the Signature attribute.)  This may happen if
-            // there are hidden (synthetic) parameters in the descriptor, but
-            // not in the Signature.  The position of these hidden parameters
-            // is unspecified; for now, assume they are at the beginning, and
-            // so skip over them. The primary case for this is two hidden
-            // parameters passed into Enum constructors.
+                // reading the method attributes has caused the
+                // symbol's type to be changed. (i.e. the Signature
+                // attribute.)  This may happen if there are hidden
+                // (synthetic) parameters in the descriptor, but not
+                // in the Signature.  The position of these hidden
+                // parameters is unspecified; for now, assume they are
+                // at the beginning, and so skip over them. The
+                // primary case for this is two hidden parameters
+                // passed into Enum constructors.
             int skip = Code.width(jvmType.getParameterTypes())
                     - Code.width(sym.type.getParameterTypes());
             firstParam += skip;
+        }
         }
         List<Name> paramNames = List.nil();
         int index = firstParam;

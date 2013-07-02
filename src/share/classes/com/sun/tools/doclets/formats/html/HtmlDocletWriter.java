@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -88,6 +88,16 @@ public class HtmlDocletWriter extends HtmlDocWriter {
      * To check whether annotation heading is printed or not.
      */
     protected boolean printedAnnotationHeading = false;
+
+    /**
+     * To check whether the repeated annotations is documented or not.
+     */
+    private boolean isAnnotationDocumented = false;
+
+    /**
+     * To check whether the container annotations is documented or not.
+     */
+    private boolean isContainerDocumented = false;
 
     /**
      * Constructor to construct the HtmlStandardWriter object.
@@ -291,6 +301,107 @@ public class HtmlDocletWriter extends HtmlDocWriter {
     }
 
     /**
+     * Get Profile Package link, with target frame.
+     *
+     * @param pd the packageDoc object
+     * @param target name of the target frame
+     * @param label tag for the link
+     * @param profileName the name of the profile being documented
+     * @return a content for the target profile packages link
+     */
+    public Content getTargetProfilePackageLink(PackageDoc pd, String target,
+            Content label, String profileName) {
+        return getHyperLink(pathString(pd, DocPaths.profilePackageSummary(profileName)),
+                label, "", target);
+    }
+
+    /**
+     * Get Profile link, with target frame.
+     *
+     * @param target name of the target frame
+     * @param label tag for the link
+     * @param profileName the name of the profile being documented
+     * @return a content for the target profile link
+     */
+    public Content getTargetProfileLink(String target, Content label,
+            String profileName) {
+        return getHyperLink(pathToRoot.resolve(
+                DocPaths.profileSummary(profileName)), label, "", target);
+    }
+
+    /**
+     * Get the type name for profile search.
+     *
+     * @param cd the classDoc object for which the type name conversion is needed
+     * @return a type name string for the type
+     */
+    public String getTypeNameForProfile(ClassDoc cd) {
+        StringBuilder typeName =
+                new StringBuilder((cd.containingPackage()).name().replace(".", "/"));
+        typeName.append("/")
+                .append(cd.name().replace(".", "$"));
+        return typeName.toString();
+    }
+
+    /**
+     * Check if a type belongs to a profile.
+     *
+     * @param cd the classDoc object that needs to be checked
+     * @param profileValue the profile in which the type needs to be checked
+     * @return true if the type is in the profile
+     */
+    public boolean isTypeInProfile(ClassDoc cd, int profileValue) {
+        return (configuration.profiles.getProfile(getTypeNameForProfile(cd)) <= profileValue);
+    }
+
+    public void addClassesSummary(ClassDoc[] classes, String label,
+            String tableSummary, String[] tableHeader, Content summaryContentTree,
+            int profileValue) {
+        if(classes.length > 0) {
+            Arrays.sort(classes);
+            Content caption = getTableCaption(label);
+            Content table = HtmlTree.TABLE(HtmlStyle.packageSummary, 0, 3, 0,
+                    tableSummary, caption);
+            table.addContent(getSummaryTableHeader(tableHeader, "col"));
+            Content tbody = new HtmlTree(HtmlTag.TBODY);
+            for (int i = 0; i < classes.length; i++) {
+                if (!isTypeInProfile(classes[i], profileValue)) {
+                    continue;
+                }
+                if (!Util.isCoreClass(classes[i]) ||
+                    !configuration.isGeneratedDoc(classes[i])) {
+                    continue;
+                }
+                Content classContent = new RawHtml(getLink(new LinkInfoImpl(
+                        configuration, LinkInfoImpl.CONTEXT_PACKAGE, classes[i],
+                        false)));
+                Content tdClass = HtmlTree.TD(HtmlStyle.colFirst, classContent);
+                HtmlTree tr = HtmlTree.TR(tdClass);
+                if (i%2 == 0)
+                    tr.addStyle(HtmlStyle.altColor);
+                else
+                    tr.addStyle(HtmlStyle.rowColor);
+                HtmlTree tdClassDescription = new HtmlTree(HtmlTag.TD);
+                tdClassDescription.addStyle(HtmlStyle.colLast);
+                if (Util.isDeprecated(classes[i])) {
+                    tdClassDescription.addContent(deprecatedLabel);
+                    if (classes[i].tags("deprecated").length > 0) {
+                        addSummaryDeprecatedComment(classes[i],
+                            classes[i].tags("deprecated")[0], tdClassDescription);
+                    }
+                }
+                else
+                    addSummaryComment(classes[i], tdClassDescription);
+                tr.addContent(tdClassDescription);
+                tbody.addContent(tr);
+            }
+            table.addContent(tbody);
+            Content li = HtmlTree.LI(HtmlStyle.blockList, table);
+            summaryContentTree.addContent(li);
+        }
+    }
+
+    /**
      * Generates the HTML document tree and prints it out.
      *
      * @param metakeywords Array of String keywords for META tag. Each element
@@ -432,7 +543,8 @@ public class HtmlDocletWriter extends HtmlDocWriter {
             }
             HtmlTree navList = new HtmlTree(HtmlTag.UL);
             navList.addStyle(HtmlStyle.navList);
-            navList.addAttr(HtmlAttr.TITLE, "Navigation");
+            navList.addAttr(HtmlAttr.TITLE,
+                            configuration.getText("doclet.Navigation"));
             if (configuration.createoverview) {
                 navList.addContent(getNavLinkContents());
             }
@@ -1188,13 +1300,31 @@ public class HtmlDocletWriter extends HtmlDocWriter {
      */
     public String getDocLink(int context, ClassDoc classDoc, MemberDoc doc,
         String label, boolean strong) {
+        return getDocLink(context, classDoc, doc, label, strong, false);
+    }
+
+   /**
+     * Return the link for the given member.
+     *
+     * @param context the id of the context where the link will be printed.
+     * @param classDoc the classDoc that we should link to.  This is not
+     *                 necessarily equal to doc.containingClass().  We may be
+     *                 inheriting comments.
+     * @param doc the member being linked to.
+     * @param label the label for the link.
+     * @param strong true if the link should be strong.
+     * @param isProperty true if the doc parameter is a JavaFX property.
+     * @return the link for the given member.
+     */
+    public String getDocLink(int context, ClassDoc classDoc, MemberDoc doc,
+        String label, boolean strong, boolean isProperty) {
         if (! (doc.isIncluded() ||
             Util.isLinkable(classDoc, configuration))) {
             return label;
         } else if (doc instanceof ExecutableMemberDoc) {
             ExecutableMemberDoc emd = (ExecutableMemberDoc)doc;
             return getLink(new LinkInfoImpl(configuration, context, classDoc,
-                getAnchor(emd), label, strong));
+                getAnchor(emd, isProperty), label, strong));
         } else if (doc instanceof MemberDoc) {
             return getLink(new LinkInfoImpl(configuration, context, classDoc,
                 doc.name(), label, strong));
@@ -1232,6 +1362,13 @@ public class HtmlDocletWriter extends HtmlDocWriter {
     }
 
     public String getAnchor(ExecutableMemberDoc emd) {
+        return getAnchor(emd, false);
+    }
+
+    public String getAnchor(ExecutableMemberDoc emd, boolean isProperty) {
+        if (isProperty) {
+            return emd.name();
+        }
         StringBuilder signature = new StringBuilder(emd.signature());
         StringBuilder signatureParsed = new StringBuilder();
         int counter = 0;
@@ -1720,6 +1857,17 @@ public class HtmlDocletWriter extends HtmlDocWriter {
     }
 
     /**
+     * Add the annotation types of the executable receiver.
+     *
+     * @param method the executable to write the receiver annotations for.
+     * @param htmltree the documentation tree to which the annotation info will be
+     *        added
+     */
+    public void addReceiverAnnotationInfo(ExecutableMemberDoc method, Content htmltree) {
+        addAnnotationInfo(method, method.receiverAnnotations(), htmltree);
+    }
+
+    /**
      * Adds the annotatation types for the given doc.
      *
      * @param doc the package to write annotations for
@@ -1789,59 +1937,185 @@ public class HtmlDocletWriter extends HtmlDocWriter {
      *         documented.
      */
     private List<String> getAnnotations(int indent, AnnotationDesc[] descList, boolean linkBreak) {
+        return getAnnotations(indent, descList, linkBreak, true);
+    }
+
+    /**
+     * Return the string representations of the annotation types for
+     * the given doc.
+     *
+     * A {@code null} {@code elementType} indicates that all the
+     * annotations should be returned without any filtering.
+     *
+     * @param indent the number of extra spaces to indent the annotations.
+     * @param descList the array of {@link AnnotationDesc}.
+     * @param linkBreak if true, add new line between each member value.
+     * @param elementType the type of targeted element (used for filtering
+     *        type annotations from declaration annotations)
+     * @return an array of strings representing the annotations being
+     *         documented.
+     */
+    public List<String> getAnnotations(int indent, AnnotationDesc[] descList, boolean linkBreak,
+            boolean isJava5DeclarationLocation) {
         List<String> results = new ArrayList<String>();
         StringBuilder annotation;
         for (int i = 0; i < descList.length; i++) {
             AnnotationTypeDoc annotationDoc = descList[i].annotationType();
-            if (! Util.isDocumentedAnnotation(annotationDoc)){
+            // If an annotation is not documented, do not add it to the list. If
+            // the annotation is of a repeatable type, and if it is not documented
+            // and also if its container annotation is not documented, do not add it
+            // to the list. If an annotation of a repeatable type is not documented
+            // but its container is documented, it will be added to the list.
+            if (! Util.isDocumentedAnnotation(annotationDoc) &&
+                    (!isAnnotationDocumented && !isContainerDocumented)) {
                 continue;
             }
+            /* TODO: check logic here to correctly handle declaration
+             * and type annotations.
+            if  (Util.isDeclarationAnnotation(annotationDoc, isJava5DeclarationLocation)) {
+                continue;
+            }*/
             annotation = new StringBuilder();
+            isAnnotationDocumented = false;
             LinkInfoImpl linkInfo = new LinkInfoImpl(configuration,
                 LinkInfoImpl.CONTEXT_ANNOTATION, annotationDoc);
-            linkInfo.label = "@" + annotationDoc.name();
-            annotation.append(getLink(linkInfo));
             AnnotationDesc.ElementValuePair[] pairs = descList[i].elementValues();
-            if (pairs.length > 0) {
-                annotation.append('(');
+            // If the annotation is synthesized, do not print the container.
+            if (descList[i].isSynthesized()) {
                 for (int j = 0; j < pairs.length; j++) {
-                    if (j > 0) {
-                        annotation.append(",");
-                        if (linkBreak) {
-                            annotation.append(DocletConstants.NL);
-                            int spaces = annotationDoc.name().length() + 2;
-                            for (int k = 0; k < (spaces + indent); k++) {
-                                annotation.append(' ');
-                            }
-                        }
-                    }
-                    annotation.append(getDocLink(LinkInfoImpl.CONTEXT_ANNOTATION,
-                        pairs[j].element(), pairs[j].element().name(), false));
-                    annotation.append('=');
                     AnnotationValue annotationValue = pairs[j].value();
                     List<AnnotationValue> annotationTypeValues = new ArrayList<AnnotationValue>();
                     if (annotationValue.value() instanceof AnnotationValue[]) {
                         AnnotationValue[] annotationArray =
-                            (AnnotationValue[]) annotationValue.value();
-                        for (int k = 0; k < annotationArray.length; k++) {
-                            annotationTypeValues.add(annotationArray[k]);
-                        }
+                                (AnnotationValue[]) annotationValue.value();
+                        annotationTypeValues.addAll(Arrays.asList(annotationArray));
                     } else {
                         annotationTypeValues.add(annotationValue);
                     }
-                    annotation.append(annotationTypeValues.size() == 1 ? "" : "{");
-                    for (Iterator<AnnotationValue> iter = annotationTypeValues.iterator(); iter.hasNext(); ) {
-                        annotation.append(annotationValueToString(iter.next()));
-                        annotation.append(iter.hasNext() ? "," : "");
+                    String sep = "";
+                    for (AnnotationValue av : annotationTypeValues) {
+                        annotation.append(sep);
+                        annotation.append(annotationValueToString(av));
+                        sep = " ";
                     }
-                    annotation.append(annotationTypeValues.size() == 1 ? "" : "}");
                 }
-                annotation.append(")");
+            }
+            else if (isAnnotationArray(pairs)) {
+                // If the container has 1 or more value defined and if the
+                // repeatable type annotation is not documented, do not print
+                // the container.
+                if (pairs.length == 1 && isAnnotationDocumented) {
+                    AnnotationValue[] annotationArray =
+                            (AnnotationValue[]) (pairs[0].value()).value();
+                    List<AnnotationValue> annotationTypeValues = new ArrayList<AnnotationValue>();
+                    annotationTypeValues.addAll(Arrays.asList(annotationArray));
+                    String sep = "";
+                    for (AnnotationValue av : annotationTypeValues) {
+                        annotation.append(sep);
+                        annotation.append(annotationValueToString(av));
+                        sep = " ";
+                    }
+                }
+                // If the container has 1 or more value defined and if the
+                // repeatable type annotation is not documented, print the container.
+                else {
+                    addAnnotations(annotationDoc, linkInfo, annotation, pairs,
+                        indent, false);
+                }
+            }
+            else {
+                addAnnotations(annotationDoc, linkInfo, annotation, pairs,
+                        indent, linkBreak);
             }
             annotation.append(linkBreak ? DocletConstants.NL : "");
             results.add(annotation.toString());
         }
         return results;
+    }
+
+    /**
+     * Add annotation to the annotation string.
+     *
+     * @param annotationDoc the annotation being documented
+     * @param linkInfo the information about the link
+     * @param annotation the annotation string to which the annotation will be added
+     * @param pairs annotation type element and value pairs
+     * @param indent the number of extra spaces to indent the annotations.
+     * @param linkBreak if true, add new line between each member value
+     */
+    private void addAnnotations(AnnotationTypeDoc annotationDoc, LinkInfoImpl linkInfo,
+            StringBuilder annotation, AnnotationDesc.ElementValuePair[] pairs,
+            int indent, boolean linkBreak) {
+        linkInfo.label = "@" + annotationDoc.name();
+        annotation.append(getLink(linkInfo));
+        if (pairs.length > 0) {
+            annotation.append('(');
+            for (int j = 0; j < pairs.length; j++) {
+                if (j > 0) {
+                    annotation.append(",");
+                    if (linkBreak) {
+                        annotation.append(DocletConstants.NL);
+                        int spaces = annotationDoc.name().length() + 2;
+                        for (int k = 0; k < (spaces + indent); k++) {
+                            annotation.append(' ');
+                        }
+                    }
+                }
+                annotation.append(getDocLink(LinkInfoImpl.CONTEXT_ANNOTATION,
+                        pairs[j].element(), pairs[j].element().name(), false));
+                annotation.append('=');
+                AnnotationValue annotationValue = pairs[j].value();
+                List<AnnotationValue> annotationTypeValues = new ArrayList<AnnotationValue>();
+                if (annotationValue.value() instanceof AnnotationValue[]) {
+                    AnnotationValue[] annotationArray =
+                            (AnnotationValue[]) annotationValue.value();
+                    annotationTypeValues.addAll(Arrays.asList(annotationArray));
+                } else {
+                    annotationTypeValues.add(annotationValue);
+                }
+                annotation.append(annotationTypeValues.size() == 1 ? "" : "{");
+                String sep = "";
+                for (AnnotationValue av : annotationTypeValues) {
+                    annotation.append(sep);
+                    annotation.append(annotationValueToString(av));
+                    sep = ",";
+                }
+                annotation.append(annotationTypeValues.size() == 1 ? "" : "}");
+                isContainerDocumented = false;
+            }
+            annotation.append(")");
+        }
+    }
+
+    /**
+     * Check if the annotation contains an array of annotation as a value. This
+     * check is to verify if a repeatable type annotation is present or not.
+     *
+     * @param pairs annotation type element and value pairs
+     *
+     * @return true if the annotation contains an array of annotation as a value.
+     */
+    private boolean isAnnotationArray(AnnotationDesc.ElementValuePair[] pairs) {
+        AnnotationValue annotationValue;
+        for (int j = 0; j < pairs.length; j++) {
+            annotationValue = pairs[j].value();
+            if (annotationValue.value() instanceof AnnotationValue[]) {
+                AnnotationValue[] annotationArray =
+                        (AnnotationValue[]) annotationValue.value();
+                if (annotationArray.length > 1) {
+                    if (annotationArray[0].value() instanceof AnnotationDesc) {
+                        AnnotationTypeDoc annotationDoc =
+                                ((AnnotationDesc) annotationArray[0].value()).annotationType();
+                        isContainerDocumented = true;
+                        if (Util.isDocumentedAnnotation(annotationDoc)) {
+                            isAnnotationDocumented = true;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     private String annotationValueToString(AnnotationValue annotationValue) {

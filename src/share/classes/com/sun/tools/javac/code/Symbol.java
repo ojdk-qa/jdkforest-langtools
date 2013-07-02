@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -84,7 +84,15 @@ public abstract class Symbol implements Element {
      *  method to make sure that the class symbol is loaded.
      */
     public List<Attribute.Compound> getRawAttributes() {
-        return annotations.getAttributes();
+        return annotations.getDeclarationAttributes();
+    }
+
+    /** An accessor method for the type attributes of this symbol.
+     *  Attributes of class symbols should be accessed through the accessor
+     *  method to make sure that the class symbol is loaded.
+     */
+    public List<Attribute.TypeCompound> getRawTypeAttributes() {
+        return annotations.getTypeAttributes();
     }
 
     /** Fetch a particular annotation from a symbol. */
@@ -209,6 +217,14 @@ public abstract class Symbol implements Element {
         return (flags() & INTERFACE) != 0;
     }
 
+    public boolean isPrivate() {
+        return (flags_field & Flags.AccessFlags) == PRIVATE;
+    }
+
+    public boolean isEnum() {
+        return (flags() & ENUM) != 0;
+    }
+
     /** Is this symbol declared (directly or indirectly) local
      *  to a method or variable initializer?
      *  Also includes fields of inner classes which are in
@@ -221,7 +237,7 @@ public abstract class Symbol implements Element {
     }
 
     /** Has this symbol an empty name? This includes anonymous
-     *  inner classses.
+     *  inner classes.
      */
     public boolean isAnonymous() {
         return name.isEmpty();
@@ -450,8 +466,16 @@ public abstract class Symbol implements Element {
      * This is the implementation for {@code
      * javax.lang.model.element.Element.getAnnotationMirrors()}.
      */
-    public final List<Attribute.Compound> getAnnotationMirrors() {
+    public final List<? extends AnnotationMirror> getAnnotationMirrors() {
         return getRawAttributes();
+    }
+
+    /**
+     * TODO: Should there be a {@code
+     * javax.lang.model.element.Element.getTypeAnnotationMirrors()}.
+     */
+    public final List<Attribute.TypeCompound> getTypeAnnotationMirrors() {
+        return getRawTypeAttributes();
     }
 
     /**
@@ -459,7 +483,12 @@ public abstract class Symbol implements Element {
      */
     @Deprecated
     public <A extends java.lang.annotation.Annotation> A getAnnotation(Class<A> annoType) {
-        return JavacElements.getAnnotation(this, annoType);
+        return JavacAnnoConstructs.getAnnotation(this, annoType);
+    }
+
+    // This method is part of the javax.lang.model API, do not use this in javac code.
+    public <A extends java.lang.annotation.Annotation> A[] getAnnotationsByType(Class<A> annoType) {
+        return JavacAnnoConstructs.getAnnotations(this, annoType);
     }
 
     // TODO: getEnclosedElements should return a javac List, fix in FilteredMemberList
@@ -475,9 +504,9 @@ public abstract class Symbol implements Element {
         return l.toList();
     }
 
-    public static class DelegatedSymbol extends Symbol {
-        protected Symbol other;
-        public DelegatedSymbol(Symbol other) {
+    public static class DelegatedSymbol<T extends Symbol> extends Symbol {
+        protected T other;
+        public DelegatedSymbol(T other) {
             super(other.kind, other.flags_field, other.name, other.type, other.owner);
             this.other = other;
         }
@@ -510,6 +539,10 @@ public abstract class Symbol implements Element {
 
         public <R, P> R accept(Symbol.Visitor<R, P> v, P p) {
             return v.visitSymbol(other, p);
+        }
+
+        public T getUnderlyingSymbol() {
+            return other;
         }
     }
 
@@ -790,6 +823,12 @@ public abstract class Symbol implements Element {
             return super.getRawAttributes();
         }
 
+        @Override
+        public List<Attribute.TypeCompound> getRawTypeAttributes() {
+            if (completer != null) complete();
+            return super.getRawTypeAttributes();
+        }
+
         public Type erasure(Types types) {
             if (erasure_field == null)
                 erasure_field = new ClassType(types.erasure(type.getEnclosingType()),
@@ -896,11 +935,12 @@ public abstract class Symbol implements Element {
         }
 
         /**
-         * @deprecated this method should never be used by javac internally.
+         * Since this method works in terms of the runtime representation
+         * of annotations, it should never be used by javac internally.
          */
-        @Override @Deprecated
+        @Override
         public <A extends java.lang.annotation.Annotation> A getAnnotation(Class<A> annoType) {
-            return JavacElements.getAnnotation(this, annoType);
+            return JavacAnnoConstructs.getAnnotation(this, annoType);
         }
 
         public <R, P> R accept(ElementVisitor<R, P> v, P p) {
@@ -1050,6 +1090,9 @@ public abstract class Symbol implements Element {
 
         /** The code of the method. */
         public Code code = null;
+
+        /** The extra (synthetic/mandated) parameters of the method. */
+        public List<VarSymbol> extraParams = List.nil();
 
         /** The parameters of the method. */
         public List<VarSymbol> params = null;
@@ -1228,7 +1271,8 @@ public abstract class Symbol implements Element {
             case Flags.PRIVATE:
                 return false;
             case Flags.PUBLIC:
-                return true;
+                return !this.owner.isInterface() ||
+                        (flags_field & STATIC) == 0;
             case Flags.PROTECTED:
                 return (origin.flags() & INTERFACE) == 0;
             case 0:
@@ -1242,6 +1286,18 @@ public abstract class Symbol implements Element {
             }
         }
 
+        @Override
+        public boolean isInheritedIn(Symbol clazz, Types types) {
+            switch ((int)(flags_field & Flags.AccessFlags)) {
+                case PUBLIC:
+                    return !this.owner.isInterface() ||
+                            clazz == owner ||
+                            (flags_field & STATIC) == 0;
+                default:
+                    return super.isInheritedIn(clazz, types);
+            }
+        }
+
         /** The implementation of this (abstract) symbol in class origin;
          *  null if none exists. Synthetic methods are not considered
          *  as possible implementations.
@@ -1250,7 +1306,7 @@ public abstract class Symbol implements Element {
             return implementation(origin, types, checkResult, implementation_filter);
         }
         // where
-            private static final Filter<Symbol> implementation_filter = new Filter<Symbol>() {
+            public static final Filter<Symbol> implementation_filter = new Filter<Symbol>() {
                 public boolean accepts(Symbol s) {
                     return s.kind == Kinds.MTH &&
                             (s.flags() & SYNTHETIC) == 0;
@@ -1283,8 +1339,9 @@ public abstract class Symbol implements Element {
                 List<Name> paramNames = savedParameterNames;
                 savedParameterNames = null;
                 // discard the provided names if the list of names is the wrong size.
-                if (paramNames == null || paramNames.size() != type.getParameterTypes().size())
+                if (paramNames == null || paramNames.size() != type.getParameterTypes().size()) {
                     paramNames = List.nil();
+                }
                 ListBuffer<VarSymbol> buf = new ListBuffer<VarSymbol>();
                 List<Name> remaining = paramNames;
                 // assert: remaining and paramNames are both empty or both
@@ -1368,7 +1425,7 @@ public abstract class Symbol implements Element {
             return defaultValue;
         }
 
-         public List<VarSymbol> getParameters() {
+        public List<VarSymbol> getParameters() {
             return params();
         }
 
@@ -1386,6 +1443,10 @@ public abstract class Symbol implements Element {
 
         public <R, P> R accept(Symbol.Visitor<R, P> v, P p) {
             return v.visitMethodSymbol(this, p);
+        }
+
+        public Type getReceiverType() {
+            return asType().getReceiverType();
         }
 
         public Type getReturnType() {

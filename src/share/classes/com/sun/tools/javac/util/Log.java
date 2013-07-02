@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -136,10 +136,12 @@ public class Log extends AbstractLog {
         }
 
         public void report(JCDiagnostic diag) {
-            if (filter == null || filter.accepts(diag))
+            if (!diag.isFlagSet(JCDiagnostic.DiagnosticFlag.NON_DEFERRABLE) &&
+                (filter == null || filter.accepts(diag))) {
                 deferred.add(diag);
-            else
+            } else {
                 prev.report(diag);
+            }
         }
 
         public Queue<JCDiagnostic> getDiagnostics() {
@@ -217,7 +219,7 @@ public class Log extends AbstractLog {
     private JavacMessages messages;
 
     /**
-+     * Handler for initial dispatch of diagnostics.
+     * Handler for initial dispatch of diagnostics.
      */
     private DiagnosticHandler diagnosticHandler;
 
@@ -385,14 +387,17 @@ public class Log extends AbstractLog {
         noticeWriter = warnWriter = errWriter = pw;
     }
 
-    public void setWriters(Log other) {
+    /**
+     * Propagate the previous log's information.
+     */
+    public void initRound(Log other) {
         this.noticeWriter = other.noticeWriter;
         this.warnWriter = other.warnWriter;
         this.errWriter = other.errWriter;
-    }
-
-    public void setSourceMap(Log other) {
         this.sourceMap = other.sourceMap;
+        this.recorded = other.recorded;
+        this.nerrors = other.nerrors;
+        this.nwarnings = other.nwarnings;
     }
 
     /**

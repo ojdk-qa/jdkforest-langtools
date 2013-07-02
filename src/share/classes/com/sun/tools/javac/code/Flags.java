@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -74,6 +74,7 @@ public class Flags {
         if ((mask&DEPRECATED) != 0) flags.add(Flag.DEPRECATED);
         if ((mask&HASINIT) != 0) flags.add(Flag.HASINIT);
         if ((mask&ENUM) != 0) flags.add(Flag.ENUM);
+        if ((mask&MANDATED) != 0) flags.add(Flag.MANDATED);
         if ((mask&IPROXY) != 0) flags.add(Flag.IPROXY);
         if ((mask&NOOUTERTHIS) != 0) flags.add(Flag.NOOUTERTHIS);
         if ((mask&EXISTS) != 0) flags.add(Flag.EXISTS);
@@ -113,6 +114,9 @@ public class Flags {
     /** An enumeration type or an enumeration constant, added in
      *  classfile v49.0. */
     public static final int ENUM         = 1<<14;
+
+    /** Added in SE8, represents constructs implicitly declared in source. */
+    public static final int MANDATED     = 1<<15;
 
     public static final int StandardFlags = 0x0fff;
     public static final int ModifierFlags = StandardFlags & ~INTERFACE;
@@ -233,28 +237,28 @@ public class Flags {
     public static final long PROPRIETARY = 1L<<38;
 
     /**
-     * Flag that marks a a multi-catch parameter
+     * Flag that marks a multi-catch parameter.
      */
     public static final long UNION = 1L<<39;
 
     /**
-     * Flag that marks a special kind of bridge methods (the ones that
-     * come from restricted supertype bounds)
+     * Flag that marks a special kind of bridge method (the ones that
+     * come from restricted supertype bounds).
      */
     public static final long OVERRIDE_BRIDGE = 1L<<40;
 
     /**
-     * Flag that marks an 'effectively final' local variable
+     * Flag that marks an 'effectively final' local variable.
      */
     public static final long EFFECTIVELY_FINAL = 1L<<41;
 
     /**
-     * Flag that marks non-override equivalent methods with the same signature
+     * Flag that marks non-override equivalent methods with the same signature.
      */
     public static final long CLASH = 1L<<42;
 
     /**
-     * Flag that marks either a default method or an interface containing default methods
+     * Flag that marks either a default method or an interface containing default methods.
      */
     public static final long DEFAULT = 1L<<43;
 
@@ -263,6 +267,16 @@ public class Flags {
      * the public class in a source file, that could block implicit compilation.
      */
     public static final long AUXILIARY = 1L<<44;
+
+    /**
+     * Flag that marks that a symbol is not available in the current profile
+     */
+    public static final long NOT_IN_PROFILE = 1L<<45;
+
+    /**
+     * Flag that indicates that an override error has been detected by Check.
+     */
+    public static final long BAD_OVERRIDE = 1L<<45;
 
     /** Modifier masks.
      */
@@ -280,7 +294,7 @@ public class Flags {
                                 SYNCHRONIZED | FINAL | STRICTFP;
     public static final long
         ExtendedStandardFlags       = (long)StandardFlags | DEFAULT,
-        InterfaceDefaultMethodMask  = ABSTRACT | PUBLIC | STRICTFP | SYNCHRONIZED | DEFAULT,
+        InterfaceMethodMask         = ABSTRACT | STATIC | PUBLIC | STRICTFP | DEFAULT,
         LocalVarFlags               = FINAL | PARAMETER;
 
 
@@ -342,6 +356,7 @@ public class Flags {
         DEPRECATED("deprecated"),
         HASINIT("hasinit"),
         ENUM("enum"),
+        MANDATED("mandated"),
         IPROXY("iproxy"),
         NOOUTERTHIS("noouterthis"),
         EXISTS("exists"),

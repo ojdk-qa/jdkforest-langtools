@@ -24,6 +24,7 @@
  */
 package com.sun.tools.javac.util;
 
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -96,7 +97,7 @@ public class RichDiagnosticFormatter extends
         this.diags = JCDiagnostic.Factory.instance(context);
         this.types = Types.instance(context);
         this.messages = JavacMessages.instance(context);
-        whereClauses = new LinkedHashMap<WhereClauseKind, Map<Type, JCDiagnostic>>();
+        whereClauses = new EnumMap<WhereClauseKind, Map<Type, JCDiagnostic>>(WhereClauseKind.class);
         configuration = new RichConfiguration(Options.instance(context), formatter);
         for (WhereClauseKind kind : WhereClauseKind.values())
             whereClauses.put(kind, new LinkedHashMap<Type, JCDiagnostic>());
@@ -288,7 +289,7 @@ public class RichDiagnosticFormatter extends
 
         public String simplify(Symbol s) {
             String name = s.getQualifiedName().toString();
-            if (!s.type.isCompound()) {
+            if (!s.type.isCompound() && !s.type.isPrimitive()) {
                 List<Symbol> conflicts = nameClashes.get(s.getSimpleName());
                 if (conflicts == null ||
                     (conflicts.size() == 1 &&
@@ -508,6 +509,16 @@ public class RichDiagnosticFormatter extends
                     visit(supertype);
                     visit(interfaces);
                 }
+            } else if (t.tsym.name.isEmpty()) {
+                //anon class
+                ClassType norm = (ClassType) t.tsym.type;
+                if (norm != null) {
+                    if (norm.interfaces_field != null && norm.interfaces_field.nonEmpty()) {
+                        visit(norm.interfaces_field.head);
+                    } else {
+                        visit(norm.supertype_field);
+                    }
+                }
             }
             nameSimplifier.addUsage(t.tsym);
             visit(t.getTypeArguments());
@@ -561,7 +572,7 @@ public class RichDiagnosticFormatter extends
     // <editor-fold defaultstate="collapsed" desc="symbol scanner">
     /**
      * Preprocess a given symbol looking for (i) additional info (where clauses) to be
-     * asdded to the main diagnostic (ii) names to be compacted
+     * added to the main diagnostic (ii) names to be compacted
      */
     protected void preprocessSymbol(Symbol s) {
         symbolPreprocessor.visit(s, null);

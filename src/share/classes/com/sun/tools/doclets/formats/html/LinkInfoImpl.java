@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -197,6 +197,11 @@ public class LinkInfoImpl extends LinkInfo {
      * Indicate that the link appears in class use documentation.
      */
     public static final int CONTEXT_CLASS_USE_HEADER = 33;
+
+    /**
+     * The header for property documentation copied from parent.
+     */
+    public static final int CONTEXT_PROPERTY_DOC_COPY = 34;
 
     public final ConfigurationImpl configuration;
 
@@ -422,6 +427,7 @@ public class LinkInfoImpl extends LinkInfo {
             case CONTEXT_SUBCLASSES:
             case CONTEXT_METHOD_DOC_COPY:
             case CONTEXT_FIELD_DOC_COPY:
+            case CONTEXT_PROPERTY_DOC_COPY:
             case CONTEXT_CLASS_USE_HEADER:
                 includeTypeInClassLinkLabel = false;
                 break;
@@ -459,6 +465,8 @@ public class LinkInfoImpl extends LinkInfo {
 
             case CONTEXT_RETURN_TYPE:
             case CONTEXT_SUMMARY_RETURN_TYPE:
+                excludeTypeBounds = true;
+                break;
             case CONTEXT_EXECUTABLE_MEMBER_PARAM:
                 excludeTypeBounds = true;
                 break;

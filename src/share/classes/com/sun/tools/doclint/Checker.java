@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,19 +25,18 @@
 
 package com.sun.tools.doclint;
 
-import java.util.regex.Matcher;
-import com.sun.source.doctree.LinkTree;
-import java.net.URI;
-import java.util.regex.Pattern;
 import java.io.IOException;
-import com.sun.tools.javac.tree.DocPretty;
 import java.io.StringWriter;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -51,12 +50,15 @@ import javax.tools.Diagnostic.Kind;
 import com.sun.source.doctree.AttributeTree;
 import com.sun.source.doctree.AuthorTree;
 import com.sun.source.doctree.DocCommentTree;
+import com.sun.source.doctree.DocRootTree;
 import com.sun.source.doctree.DocTree;
 import com.sun.source.doctree.EndElementTree;
 import com.sun.source.doctree.EntityTree;
 import com.sun.source.doctree.ErroneousTree;
 import com.sun.source.doctree.IdentifierTree;
 import com.sun.source.doctree.InheritDocTree;
+import com.sun.source.doctree.LinkTree;
+import com.sun.source.doctree.LiteralTree;
 import com.sun.source.doctree.ParamTree;
 import com.sun.source.doctree.ReferenceTree;
 import com.sun.source.doctree.ReturnTree;
@@ -66,11 +68,12 @@ import com.sun.source.doctree.SinceTree;
 import com.sun.source.doctree.StartElementTree;
 import com.sun.source.doctree.TextTree;
 import com.sun.source.doctree.ThrowsTree;
+import com.sun.source.doctree.ValueTree;
 import com.sun.source.doctree.VersionTree;
 import com.sun.source.util.DocTreeScanner;
 import com.sun.source.util.TreePath;
 import com.sun.tools.doclint.HtmlTag.AttrKind;
-import java.net.URISyntaxException;
+import com.sun.tools.javac.tree.DocPretty;
 import static com.sun.tools.doclint.Messages.Group.*;
 
 
@@ -91,10 +94,12 @@ public class Checker extends DocTreeScanner<Void, Void> {
     boolean foundInheritDoc = false;
     boolean foundReturn = false;
 
-    enum Flag {
+    public enum Flag {
         TABLE_HAS_CAPTION,
         HAS_ELEMENT,
-        HAS_TEXT
+        HAS_INLINE_TAG,
+        HAS_TEXT,
+        REPORTED_BAD_INLINE
     }
 
     static class TagStackItem {
@@ -194,7 +199,8 @@ public class Checker extends DocTreeScanner<Void, Void> {
 
     @Override
     public Void visitText(TextTree tree, Void ignore) {
-        if (!tree.getBody().trim().isEmpty()) {
+        if (hasNonWhitespace(tree)) {
+            checkAllowsText(tree);
             markEnclosingTag(Flag.HAS_TEXT);
         }
         return null;
@@ -202,6 +208,7 @@ public class Checker extends DocTreeScanner<Void, Void> {
 
     @Override
     public Void visitEntity(EntityTree tree, Void ignore) {
+        checkAllowsText(tree);
         markEnclosingTag(Flag.HAS_TEXT);
         String name = tree.getName().toString();
         if (name.startsWith("#")) {
@@ -217,6 +224,18 @@ public class Checker extends DocTreeScanner<Void, Void> {
         return null;
     }
 
+    void checkAllowsText(DocTree tree) {
+        TagStackItem top = tagStack.peek();
+        if (top != null
+                && top.tree.getKind() == DocTree.Kind.START_ELEMENT
+                && !top.tag.acceptsText()) {
+            if (top.flags.add(Flag.REPORTED_BAD_INLINE)) {
+                env.messages.error(HTML, tree, "dc.text.not.allowed",
+                        ((StartElementTree) top.tree).getName());
+            }
+        }
+    }
+
     // </editor-fold>
 
     // <editor-fold defaultstate="collapsed" desc="HTML elements">
@@ -229,53 +248,29 @@ public class Checker extends DocTreeScanner<Void, Void> {
         if (t == null) {
             env.messages.error(HTML, tree, "dc.tag.unknown", treeName);
         } else {
+            boolean done = false;
+            for (TagStackItem tsi: tagStack) {
+                if (tsi.tag.accepts(t)) {
+                    while (tagStack.peek() != tsi) tagStack.pop();
+                    done = true;
+                    break;
+                } else if (tsi.tag.endKind != HtmlTag.EndKind.OPTIONAL) {
+                    done = true;
+                    break;
+                }
+            }
+            if (!done && HtmlTag.BODY.accepts(t)) {
+                tagStack.clear();
+            }
+
+            checkStructure(tree, t);
+
             // tag specific checks
             switch (t) {
                 // check for out of sequence headers, such as <h1>...</h1>  <h3>...</h3>
                 case H1: case H2: case H3: case H4: case H5: case H6:
                     checkHeader(tree, t);
                     break;
-                // <p> inside <pre>
-                case P:
-                    TagStackItem top = tagStack.peek();
-                    if (top != null && top.tag == HtmlTag.PRE)
-                        env.messages.warning(HTML, tree, "dc.tag.p.in.pre");
-                    break;
-            }
-
-            // check that only block tags and inline tags are used,
-            // and that blocks tags are not used within inline tags
-            switch (t.blockType) {
-                case INLINE:
-                    break;
-                case BLOCK:
-                    TagStackItem top = tagStack.peek();
-                    if (top != null && top.tag != null && top.tag.blockType == HtmlTag.BlockType.INLINE) {
-                        switch (top.tree.getKind()) {
-                            case START_ELEMENT: {
-                                Name name = ((StartElementTree) top.tree).getName();
-                                env.messages.error(HTML, tree, "dc.tag.not.allowed.inline.element",
-                                        treeName, name);
-                                break;
-                            }
-                            case LINK:
-                            case LINK_PLAIN: {
-                                String name = top.tree.getKind().tagName;
-                                env.messages.error(HTML, tree, "dc.tag.not.allowed.inline.tag",
-                                        treeName, name);
-                                break;
-                            }
-                            default:
-                                env.messages.error(HTML, tree, "dc.tag.not.allowed.inline.other",
-                                        treeName);
-                        }
-                    }
-                    break;
-                case OTHER:
-                    env.messages.error(HTML, tree, "dc.tag.not.allowed", treeName);
-                    break;
-                default:
-                    throw new AssertionError();
             }
 
             if (t.flags.contains(HtmlTag.Flag.NO_NEST)) {
@@ -323,6 +318,58 @@ public class Checker extends DocTreeScanner<Void, Void> {
         }
     }
 
+    private void checkStructure(StartElementTree tree, HtmlTag t) {
+        Name treeName = tree.getName();
+        TagStackItem top = tagStack.peek();
+        switch (t.blockType) {
+            case BLOCK:
+                if (top == null || top.tag.accepts(t))
+                    return;
+
+                switch (top.tree.getKind()) {
+                    case START_ELEMENT: {
+                        if (top.tag.blockType == HtmlTag.BlockType.INLINE) {
+                            Name name = ((StartElementTree) top.tree).getName();
+                            env.messages.error(HTML, tree, "dc.tag.not.allowed.inline.element",
+                                    treeName, name);
+                            return;
+                        }
+                    }
+                    break;
+
+                    case LINK:
+                    case LINK_PLAIN: {
+                        String name = top.tree.getKind().tagName;
+                        env.messages.error(HTML, tree, "dc.tag.not.allowed.inline.tag",
+                                treeName, name);
+                        return;
+                    }
+                }
+                break;
+
+            case INLINE:
+                if (top == null || top.tag.accepts(t))
+                    return;
+                break;
+
+            case LIST_ITEM:
+            case TABLE_ITEM:
+                if (top != null) {
+                    // reset this flag so subsequent bad inline content gets reported
+                    top.flags.remove(Flag.REPORTED_BAD_INLINE);
+                    if (top.tag.accepts(t))
+                        return;
+                }
+                break;
+
+            case OTHER:
+                env.messages.error(HTML, tree, "dc.tag.not.allowed", treeName);
+                return;
+        }
+
+        env.messages.error(HTML, tree, "dc.tag.not.allowed.here", treeName);
+    }
+
     private void checkHeader(StartElementTree tree, HtmlTag tag) {
         // verify the new tag
         if (getHeaderLevel(tag) > getHeaderLevel(currHeaderTag) + 1) {
@@ -359,9 +406,8 @@ public class Checker extends DocTreeScanner<Void, Void> {
             env.messages.error(HTML, tree, "dc.tag.unknown", treeName);
         } else if (t.endKind == HtmlTag.EndKind.NONE) {
             env.messages.error(HTML, tree, "dc.tag.end.not.permitted", treeName);
-        } else if (tagStack.isEmpty()) {
-            env.messages.error(HTML, tree, "dc.tag.end.unexpected", treeName);
         } else {
+            boolean done = false;
             while (!tagStack.isEmpty()) {
                 TagStackItem top = tagStack.peek();
                 if (t == top.tag) {
@@ -375,14 +421,12 @@ public class Checker extends DocTreeScanner<Void, Void> {
                     }
                     if (t.flags.contains(HtmlTag.Flag.EXPECT_CONTENT)
                             && !top.flags.contains(Flag.HAS_TEXT)
-                            && !top.flags.contains(Flag.HAS_ELEMENT)) {
+                            && !top.flags.contains(Flag.HAS_ELEMENT)
+                            && !top.flags.contains(Flag.HAS_INLINE_TAG)) {
                         env.messages.warning(HTML, tree, "dc.tag.empty", treeName);
                     }
-                    if (t.flags.contains(HtmlTag.Flag.NO_TEXT)
-                            && top.flags.contains(Flag.HAS_TEXT)) {
-                        env.messages.error(HTML, tree, "dc.text.not.allowed", treeName);
-                    }
                     tagStack.pop();
+                    done = true;
                     break;
                 } else if (top.tag == null || top.tag.endKind != HtmlTag.EndKind.REQUIRED) {
                     tagStack.pop();
@@ -400,9 +444,14 @@ public class Checker extends DocTreeScanner<Void, Void> {
                         tagStack.pop();
                     } else {
                         env.messages.error(HTML, tree, "dc.tag.end.unexpected", treeName);
+                        done = true;
                         break;
                     }
                 }
+            }
+
+            if (!done && tagStack.isEmpty()) {
+                env.messages.error(HTML, tree, "dc.tag.end.unexpected", treeName);
             }
         }
 
@@ -447,14 +496,18 @@ public class Checker extends DocTreeScanner<Void, Void> {
                         if (currTag != HtmlTag.A) {
                             break;
                         }
-                    // fallthrough
+                        // fallthrough
                     case ID:
                         String value = getAttrValue(tree);
-                        if (!validName.matcher(value).matches()) {
-                            env.messages.error(HTML, tree, "dc.invalid.anchor", value);
-                        }
-                        if (!foundAnchors.add(value)) {
-                            env.messages.error(HTML, tree, "dc.anchor.already.defined", value);
+                        if (value == null) {
+                            env.messages.error(HTML, tree, "dc.anchor.value.missing");
+                        } else {
+                            if (!validName.matcher(value).matches()) {
+                                env.messages.error(HTML, tree, "dc.invalid.anchor", value);
+                            }
+                            if (!foundAnchors.add(value)) {
+                                env.messages.error(HTML, tree, "dc.anchor.already.defined", value);
+                            }
                         }
                         break;
 
@@ -522,7 +575,14 @@ public class Checker extends DocTreeScanner<Void, Void> {
     }
 
     @Override
+    public Void visitDocRoot(DocRootTree tree, Void ignore) {
+        markEnclosingTag(Flag.HAS_INLINE_TAG);
+        return super.visitDocRoot(tree, ignore);
+    }
+
+    @Override
     public Void visitInheritDoc(InheritDocTree tree, Void ignore) {
+        markEnclosingTag(Flag.HAS_INLINE_TAG);
         // TODO: verify on overridden method
         foundInheritDoc = true;
         return super.visitInheritDoc(tree, ignore);
@@ -530,6 +590,7 @@ public class Checker extends DocTreeScanner<Void, Void> {
 
     @Override
     public Void visitLink(LinkTree tree, Void ignore) {
+        markEnclosingTag(Flag.HAS_INLINE_TAG);
         // simulate inline context on tag stack
         HtmlTag t = (tree.getKind() == DocTree.Kind.LINK)
                 ? HtmlTag.CODE : HtmlTag.SPAN;
@@ -539,6 +600,20 @@ public class Checker extends DocTreeScanner<Void, Void> {
         } finally {
             tagStack.pop();
         }
+    }
+
+    @Override
+    public Void visitLiteral(LiteralTree tree, Void ignore) {
+        markEnclosingTag(Flag.HAS_INLINE_TAG);
+        if (tree.getKind() == DocTree.Kind.CODE) {
+            for (TagStackItem tsi: tagStack) {
+                if (tsi.tag == HtmlTag.CODE) {
+                    env.messages.warning(HTML, tree, "dc.tag.code.within.code");
+                    break;
+                }
+            }
+        }
+        return super.visitLiteral(tree, ignore);
     }
 
     @Override
@@ -684,6 +759,12 @@ public class Checker extends DocTreeScanner<Void, Void> {
     }
 
     @Override
+    public Void visitValue(ValueTree tree, Void ignore) {
+        markEnclosingTag(Flag.HAS_INLINE_TAG);
+        return super.visitValue(tree, ignore);
+    }
+
+    @Override
     public Void visitVersion(VersionTree tree, Void ignore) {
         warnIfEmpty(tree, tree.getBody());
         return super.visitVersion(tree, ignore);
@@ -740,7 +821,7 @@ public class Checker extends DocTreeScanner<Void, Void> {
         for (DocTree d: list) {
             switch (d.getKind()) {
                 case TEXT:
-                    if (!((TextTree) d).getBody().trim().isEmpty())
+                    if (hasNonWhitespace((TextTree) d))
                         return;
                     break;
                 default:
@@ -749,6 +830,16 @@ public class Checker extends DocTreeScanner<Void, Void> {
         }
         env.messages.warning(SYNTAX, tree, "dc.empty", tree.getKind().tagName);
     }
+
+    boolean hasNonWhitespace(TextTree tree) {
+        String s = tree.getBody();
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isWhitespace(s.charAt(i)))
+                return true;
+        }
+        return false;
+    }
+
     // </editor-fold>
 
 }

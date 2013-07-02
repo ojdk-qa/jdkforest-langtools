@@ -73,6 +73,7 @@ public class Names {
     public final Name clone;
     public final Name close;
     public final Name compareTo;
+    public final Name deserializeLambda;
     public final Name desiredAssertionStatus;
     public final Name equals;
     public final Name error;
@@ -132,6 +133,7 @@ public class Names {
     public final Name LineNumberTable;
     public final Name LocalVariableTable;
     public final Name LocalVariableTypeTable;
+    public final Name MethodParameters;
     public final Name RuntimeInvisibleAnnotations;
     public final Name RuntimeInvisibleParameterAnnotations;
     public final Name RuntimeInvisibleTypeAnnotations;
@@ -173,6 +175,7 @@ public class Names {
     //lambda-related
     public final Name lambda;
     public final Name metaFactory;
+    public final Name altMetaFactory;
 
     public final Name.Table table;
 
@@ -206,6 +209,7 @@ public class Names {
         clone = fromString("clone");
         close = fromString("close");
         compareTo = fromString("compareTo");
+        deserializeLambda = fromString("$deserializeLambda$");
         desiredAssertionStatus = fromString("desiredAssertionStatus");
         equals = fromString("equals");
         error = fromString("<error>");
@@ -265,6 +269,7 @@ public class Names {
         LineNumberTable = fromString("LineNumberTable");
         LocalVariableTable = fromString("LocalVariableTable");
         LocalVariableTypeTable = fromString("LocalVariableTypeTable");
+        MethodParameters = fromString("MethodParameters");
         RuntimeInvisibleAnnotations = fromString("RuntimeInvisibleAnnotations");
         RuntimeInvisibleParameterAnnotations = fromString("RuntimeInvisibleParameterAnnotations");
         RuntimeInvisibleTypeAnnotations = fromString("RuntimeInvisibleTypeAnnotations");
@@ -304,8 +309,9 @@ public class Names {
         package_info = fromString("package-info");
 
         //lambda-related
-        lambda = fromString("lambda");
+        lambda = fromString("lambda$");
         metaFactory = fromString("metaFactory");
+        altMetaFactory = fromString("altMetaFactory");
     }
 
     protected Name.Table createTable(Options options) {

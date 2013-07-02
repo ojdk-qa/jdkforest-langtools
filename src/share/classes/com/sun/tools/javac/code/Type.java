@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,12 +25,16 @@
 
 package com.sun.tools.javac.code;
 
+import com.sun.tools.javac.model.JavacAnnoConstructs;
+import com.sun.tools.javac.model.JavacTypes;
+import java.lang.annotation.Annotation;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.Set;
 
+import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.type.*;
 
 import com.sun.tools.javac.code.Symbol.*;
@@ -87,7 +91,7 @@ public class Type implements PrimitiveType {
      */
     protected TypeTag tag;
 
-    /** The defining class / interface / package / type variable
+    /** The defining class / interface / package / type variable.
      */
     public TypeSymbol tsym;
 
@@ -166,7 +170,7 @@ public class Type implements PrimitiveType {
     /**
      * Get the representation of this type used for modelling purposes.
      * By default, this is itself. For ErrorType, a different value
-     * may be provided,
+     * may be provided.
      */
     public Type getModelType() {
         return this;
@@ -243,6 +247,35 @@ public class Type implements PrimitiveType {
      */
     public Type baseType() {
         return this;
+    }
+
+    public boolean isAnnotated() {
+        return false;
+    }
+
+    /**
+     * If this is an annotated type, return the underlying type.
+     * Otherwise, return the type itself.
+     */
+    public Type unannotatedType() {
+        return this;
+    }
+
+    @Override
+    public List<? extends Attribute.TypeCompound> getAnnotationMirrors() {
+        return List.nil();
+    }
+
+    @Override
+    public <A extends Annotation> A getAnnotation(Class<A> annotationType) {
+        return null;
+    }
+
+    @Override
+    public <A extends Annotation> A[] getAnnotationsByType(Class<A> annotationType) {
+        @SuppressWarnings("unchecked")
+        A[] tmp = (A[]) java.lang.reflect.Array.newInstance(annotationType, 0);
+        return tmp;
     }
 
     /** Return the base types of a list of types.
@@ -339,8 +372,11 @@ public class Type implements PrimitiveType {
             args = args.tail;
             buf.append(',');
         }
-        if (args.head.tag == ARRAY) {
-            buf.append(((ArrayType)args.head).elemtype);
+        if (args.head.unannotatedType().tag == ARRAY) {
+            buf.append(((ArrayType)args.head.unannotatedType()).elemtype);
+            if (args.head.getAnnotationMirrors().nonEmpty()) {
+                buf.append(args.head.getAnnotationMirrors());
+            }
             buf.append("...");
         } else {
             buf.append(args.head);
@@ -351,9 +387,10 @@ public class Type implements PrimitiveType {
     /** Access methods.
      */
     public List<Type>        getTypeArguments()  { return List.nil(); }
-    public Type              getEnclosingType() { return null; }
+    public Type              getEnclosingType()  { return null; }
     public List<Type>        getParameterTypes() { return List.nil(); }
     public Type              getReturnType()     { return null; }
+    public Type              getReceiverType()   { return null; }
     public List<Type>        getThrownTypes()    { return List.nil(); }
     public Type              getUpperBound()     { return null; }
     public Type              getLowerBound()     { return null; }
@@ -600,7 +637,7 @@ public class Type implements PrimitiveType {
 
         /** The enclosing type of this type. If this is the type of an inner
          *  class, outer_field refers to the type of its enclosing
-         *  instance class, in all other cases it referes to noType.
+         *  instance class, in all other cases it refers to noType.
          */
         private Type outer_field;
 
@@ -974,6 +1011,10 @@ public class Type implements PrimitiveType {
         public Type restype;
         public List<Type> thrown;
 
+        /** The type annotations on the method receiver.
+         */
+        public Type recvtype;
+
         public MethodType(List<Type> argtypes,
                           Type restype,
                           List<Type> thrown,
@@ -1000,6 +1041,7 @@ public class Type implements PrimitiveType {
 
         public List<Type>        getParameterTypes() { return argtypes; }
         public Type              getReturnType()     { return restype; }
+        public Type              getReceiverType()   { return recvtype; }
         public List<Type>        getThrownTypes()    { return thrown; }
 
         public boolean isErroneous() {
@@ -1028,6 +1070,7 @@ public class Type implements PrimitiveType {
             for (List<Type> l = argtypes; l.nonEmpty(); l = l.tail)
                 l.head.complete();
             restype.complete();
+            recvtype.complete();
             for (List<Type> l = thrown; l.nonEmpty(); l = l.tail)
                 l.head.complete();
         }
@@ -1112,7 +1155,11 @@ public class Type implements PrimitiveType {
         }
 
         @Override
-        public Type getUpperBound() { return bound; }
+        public Type getUpperBound() {
+            if ((bound == null || bound.tag == NONE) && this != tsym.type)
+                bound = tsym.type.getUpperBound();
+            return bound;
+        }
 
         int rank_field = -1;
 
@@ -1183,6 +1230,7 @@ public class Type implements PrimitiveType {
         public Type getEnclosingType() { return qtype.getEnclosingType(); }
         public List<Type> getParameterTypes() { return qtype.getParameterTypes(); }
         public Type getReturnType() { return qtype.getReturnType(); }
+        public Type getReceiverType() { return qtype.getReceiverType(); }
         public List<Type> getThrownTypes() { return qtype.getThrownTypes(); }
         public List<Type> allparams() { return qtype.allparams(); }
         public Type getUpperBound() { return qtype.getUpperBound(); }
@@ -1284,6 +1332,9 @@ public class Type implements PrimitiveType {
         /** inference variable's inferred type (set from Infer.java) */
         public Type inst = null;
 
+        /** number of declared (upper) bounds */
+        public int declaredCount;
+
         /** inference variable's change listener */
         public UndetVarListener listener = null;
 
@@ -1293,13 +1344,11 @@ public class Type implements PrimitiveType {
         }
 
         public UndetVar(TypeVar origin, Types types) {
-            this(origin, types, true);
-        }
-
-        public UndetVar(TypeVar origin, Types types, boolean includeBounds) {
             super(UNDETVAR, origin);
             bounds = new EnumMap<InferenceBound, List<Type>>(InferenceBound.class);
-            bounds.put(InferenceBound.UPPER, includeBounds ? types.getBounds(origin) : List.<Type>nil());
+            List<Type> declaredBounds = types.getBounds(origin);
+            declaredCount = declaredBounds.length();
+            bounds.put(InferenceBound.UPPER, declaredBounds);
             bounds.put(InferenceBound.LOWER, List.<Type>nil());
             bounds.put(InferenceBound.EQ, List.<Type>nil());
         }
@@ -1315,38 +1364,89 @@ public class Type implements PrimitiveType {
         }
 
         /** get all bounds of a given kind */
-        public List<Type> getBounds(InferenceBound ib) {
-            return bounds.get(ib);
+        public List<Type> getBounds(InferenceBound... ibs) {
+            ListBuffer<Type> buf = ListBuffer.lb();
+            for (InferenceBound ib : ibs) {
+                buf.appendList(bounds.get(ib));
+            }
+            return buf.toList();
+        }
+
+        /** get the list of declared (upper) bounds */
+        public List<Type> getDeclaredBounds() {
+            ListBuffer<Type> buf = ListBuffer.lb();
+            int count = 0;
+            for (Type b : getBounds(InferenceBound.UPPER)) {
+                if (count++ == declaredCount) break;
+                buf.append(b);
+            }
+            return buf.toList();
         }
 
         /** add a bound of a given kind - this might trigger listener notification */
         public void addBound(InferenceBound ib, Type bound, Types types) {
+            Type bound2 = toTypeVarMap.apply(bound);
             List<Type> prevBounds = bounds.get(ib);
             for (Type b : prevBounds) {
-                if (types.isSameType(b, bound)) {
-                    return;
-                }
+                //check for redundancy - use strict version of isSameType on tvars
+                //(as the standard version will lead to false positives w.r.t. clones ivars)
+                if (types.isSameType(b, bound2, true) || bound == qtype) return;
             }
-            bounds.put(ib, prevBounds.prepend(bound));
+            bounds.put(ib, prevBounds.prepend(bound2));
             notifyChange(EnumSet.of(ib));
         }
+        //where
+            Type.Mapping toTypeVarMap = new Mapping("toTypeVarMap") {
+                @Override
+                public Type apply(Type t) {
+                    if (t.hasTag(UNDETVAR)) {
+                        UndetVar uv = (UndetVar)t;
+                        return uv.qtype;
+                    } else {
+                        return t.map(this);
+                    }
+                }
+            };
 
         /** replace types in all bounds - this might trigger listener notification */
         public void substBounds(List<Type> from, List<Type> to, Types types) {
-            EnumSet<InferenceBound> changed = EnumSet.noneOf(InferenceBound.class);
-            Map<InferenceBound, List<Type>> bounds2 = new EnumMap<InferenceBound, List<Type>>(InferenceBound.class);
-            for (Map.Entry<InferenceBound, List<Type>> _entry : bounds.entrySet()) {
-                InferenceBound ib = _entry.getKey();
-                List<Type> prevBounds = _entry.getValue();
-                List<Type> newBounds = types.subst(prevBounds, from, to);
-                bounds2.put(ib, newBounds);
-                if (prevBounds != newBounds) {
-                    changed.add(ib);
+            List<Type> instVars = from.diff(to);
+            //if set of instantiated ivars is empty, there's nothing to do!
+            if (instVars.isEmpty()) return;
+            final EnumSet<InferenceBound> boundsChanged = EnumSet.noneOf(InferenceBound.class);
+            UndetVarListener prevListener = listener;
+            try {
+                //setup new listener for keeping track of changed bounds
+                listener = new UndetVarListener() {
+                    public void varChanged(UndetVar uv, Set<InferenceBound> ibs) {
+                        boundsChanged.addAll(ibs);
+                    }
+                };
+                for (Map.Entry<InferenceBound, List<Type>> _entry : bounds.entrySet()) {
+                    InferenceBound ib = _entry.getKey();
+                    List<Type> prevBounds = _entry.getValue();
+                    ListBuffer<Type> newBounds = ListBuffer.lb();
+                    ListBuffer<Type> deps = ListBuffer.lb();
+                    //step 1 - re-add bounds that are not dependent on ivars
+                    for (Type t : prevBounds) {
+                        if (!t.containsAny(instVars)) {
+                            newBounds.append(t);
+                        } else {
+                            deps.append(t);
+                        }
+                    }
+                    //step 2 - replace bounds
+                    bounds.put(ib, newBounds.toList());
+                    //step 3 - for each dependency, add new replaced bound
+                    for (Type dep : deps) {
+                        addBound(ib, types.subst(dep, from, to), types);
+                    }
                 }
-            }
-            if (!changed.isEmpty()) {
-                bounds = bounds2;
-                notifyChange(changed);
+            } finally {
+                listener = prevListener;
+                if (!boundsChanged.isEmpty()) {
+                    notifyChange(boundsChanged);
+                }
             }
         }
 
@@ -1435,7 +1535,7 @@ public class Type implements PrimitiveType {
         }
 
         public Type constType(Object constValue) { return this; }
-        public Type getEnclosingType()          { return this; }
+        public Type getEnclosingType()           { return this; }
         public Type getReturnType()              { return this; }
         public Type asSub(Symbol sym)            { return this; }
         public Type map(Mapping f)               { return this; }
@@ -1461,11 +1561,180 @@ public class Type implements PrimitiveType {
         }
     }
 
+    public static class AnnotatedType extends Type
+            implements
+                javax.lang.model.type.ArrayType,
+                javax.lang.model.type.DeclaredType,
+                javax.lang.model.type.PrimitiveType,
+                javax.lang.model.type.TypeVariable,
+                javax.lang.model.type.WildcardType {
+        /** The type annotations on this type.
+         */
+        public List<Attribute.TypeCompound> typeAnnotations;
+
+        /** The underlying type that is annotated.
+         */
+        public Type underlyingType;
+
+        public AnnotatedType(Type underlyingType) {
+            super(underlyingType.tag, underlyingType.tsym);
+            this.typeAnnotations = List.nil();
+            this.underlyingType = underlyingType;
+            Assert.check(!underlyingType.isAnnotated(),
+                    "Can't annotate already annotated type: " + underlyingType);
+        }
+
+        public AnnotatedType(List<Attribute.TypeCompound> typeAnnotations,
+                Type underlyingType) {
+            super(underlyingType.tag, underlyingType.tsym);
+            this.typeAnnotations = typeAnnotations;
+            this.underlyingType = underlyingType;
+            Assert.check(!underlyingType.isAnnotated(),
+                    "Can't annotate already annotated type: " + underlyingType +
+                    "; adding: " + typeAnnotations);
+        }
+
+        @Override
+        public boolean isAnnotated() {
+            return true;
+        }
+
+        @Override
+        public List<? extends Attribute.TypeCompound> getAnnotationMirrors() {
+            return typeAnnotations;
+        }
+
+        @Override
+        public <A extends Annotation> A getAnnotation(Class<A> annotationType) {
+            return JavacAnnoConstructs.getAnnotation(this, annotationType);
+        }
+
+        @Override
+        public <A extends Annotation> A[] getAnnotationsByType(Class<A> annotationType) {
+            return JavacAnnoConstructs.getAnnotationsByType(this, annotationType);
+        }
+
+        @Override
+        public TypeKind getKind() {
+            return underlyingType.getKind();
+        }
+
+        @Override
+        public Type unannotatedType() {
+            return underlyingType;
+        }
+
+        @Override
+        public <R,S> R accept(Type.Visitor<R,S> v, S s) {
+            return v.visitAnnotatedType(this, s);
+        }
+
+        @Override
+        public <R, P> R accept(TypeVisitor<R, P> v, P p) {
+            return underlyingType.accept(v, p);
+        }
+
+        @Override
+        public Type map(Mapping f) {
+            underlyingType.map(f);
+            return this;
+        }
+
+        @Override
+        public Type constType(Object constValue) { return underlyingType.constType(constValue); }
+        @Override
+        public Type getEnclosingType()           { return underlyingType.getEnclosingType(); }
+
+        @Override
+        public Type getReturnType()              { return underlyingType.getReturnType(); }
+        @Override
+        public List<Type> getTypeArguments()     { return underlyingType.getTypeArguments(); }
+        @Override
+        public List<Type> getParameterTypes()    { return underlyingType.getParameterTypes(); }
+        @Override
+        public Type getReceiverType()            { return underlyingType.getReceiverType(); }
+        @Override
+        public List<Type> getThrownTypes()       { return underlyingType.getThrownTypes(); }
+        @Override
+        public Type getUpperBound()              { return underlyingType.getUpperBound(); }
+        @Override
+        public Type getLowerBound()              { return underlyingType.getLowerBound(); }
+
+        @Override
+        public boolean isErroneous()             { return underlyingType.isErroneous(); }
+        @Override
+        public boolean isCompound()              { return underlyingType.isCompound(); }
+        @Override
+        public boolean isInterface()             { return underlyingType.isInterface(); }
+        @Override
+        public List<Type> allparams()            { return underlyingType.allparams(); }
+        @Override
+        public boolean isNumeric()               { return underlyingType.isNumeric(); }
+        @Override
+        public boolean isReference()             { return underlyingType.isReference(); }
+        @Override
+        public boolean isParameterized()         { return underlyingType.isParameterized(); }
+        @Override
+        public boolean isRaw()                   { return underlyingType.isRaw(); }
+        @Override
+        public boolean isFinal()                 { return underlyingType.isFinal(); }
+        @Override
+        public boolean isSuperBound()            { return underlyingType.isSuperBound(); }
+        @Override
+        public boolean isExtendsBound()          { return underlyingType.isExtendsBound(); }
+        @Override
+        public boolean isUnbound()               { return underlyingType.isUnbound(); }
+
+        @Override
+        public String toString() {
+            // TODO more logic for arrays, etc.
+            if (typeAnnotations != null &&
+                    !typeAnnotations.isEmpty()) {
+                return "(" + typeAnnotations.toString() + " :: " + underlyingType.toString() + ")";
+            } else {
+                return "({} :: " + underlyingType.toString() +")";
+            }
+        }
+
+        @Override
+        public boolean contains(Type t)          { return underlyingType.contains(t); }
+
+        // TODO: attach annotations?
+        @Override
+        public Type withTypeVar(Type t)          { return underlyingType.withTypeVar(t); }
+
+        // TODO: attach annotations?
+        @Override
+        public TypeSymbol asElement()            { return underlyingType.asElement(); }
+
+        // TODO: attach annotations?
+        @Override
+        public MethodType asMethodType()         { return underlyingType.asMethodType(); }
+
+        @Override
+        public void complete()                   { underlyingType.complete(); }
+
+        @Override
+        public TypeMirror getComponentType()     { return ((ArrayType)underlyingType).getComponentType(); }
+
+        // The result is an ArrayType, but only in the model sense, not the Type sense.
+        public AnnotatedType makeVarargs() {
+            AnnotatedType atype = new AnnotatedType(((ArrayType)underlyingType).makeVarargs());
+            atype.typeAnnotations = this.typeAnnotations;
+            return atype;
+        }
+
+        @Override
+        public TypeMirror getExtendsBound()      { return ((WildcardType)underlyingType).getExtendsBound(); }
+        @Override
+        public TypeMirror getSuperBound()        { return ((WildcardType)underlyingType).getSuperBound(); }
+    }
+
     /**
      * A visitor for types.  A visitor is used to implement operations
      * (or relations) on types.  Most common operations on types are
      * binary relations and this interface is designed for binary
-     * relations, that is, operations on the form
+     * relations, that is, operations of the form
      * Type&nbsp;&times;&nbsp;S&nbsp;&rarr;&nbsp;R.
      * <!-- In plain text: Type x S -> R -->
      *
@@ -1486,6 +1755,7 @@ public class Type implements PrimitiveType {
         R visitForAll(ForAll t, S s);
         R visitUndetVar(UndetVar t, S s);
         R visitErrorType(ErrorType t, S s);
+        R visitAnnotatedType(AnnotatedType t, S s);
         R visitType(Type t, S s);
     }
 }

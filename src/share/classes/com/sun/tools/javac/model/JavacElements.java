@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,8 +25,6 @@
 
 package com.sun.tools.javac.model;
 
-import java.lang.annotation.Annotation;
-import java.lang.annotation.Inherited;
 import java.util.Map;
 
 import javax.lang.model.SourceVersion;
@@ -38,7 +36,6 @@ import static javax.lang.model.util.ElementFilter.methodsIn;
 
 import com.sun.tools.javac.code.*;
 import com.sun.tools.javac.code.Symbol.*;
-import com.sun.tools.javac.code.TypeTag;
 import com.sun.tools.javac.comp.AttrContext;
 import com.sun.tools.javac.comp.Enter;
 import com.sun.tools.javac.comp.Env;
@@ -95,43 +92,6 @@ public class JavacElements implements Elements {
         types = Types.instance(context);
         enter = Enter.instance(context);
     }
-
-
-    /**
-     * An internal-use utility that creates a reified annotation.
-     */
-    public static <A extends Annotation> A getAnnotation(Symbol annotated,
-                                                         Class<A> annoType) {
-        if (!annoType.isAnnotation())
-            throw new IllegalArgumentException("Not an annotation type: "
-                                               + annoType);
-        String name = annoType.getName();
-        for (Attribute.Compound anno : annotated.getAnnotationMirrors())
-            if (name.equals(anno.type.tsym.flatName().toString()))
-                return AnnotationProxyMaker.generateAnnotation(anno, annoType);
-        return null;
-    }
-
-    /**
-     * An internal-use utility that creates a reified annotation.
-     * This overloaded version take annotation inheritance into account.
-     */
-    public static <A extends Annotation> A getAnnotation(ClassSymbol annotated,
-                                                         Class<A> annoType) {
-        boolean inherited = annoType.isAnnotationPresent(Inherited.class);
-        A result = null;
-        while (annotated.name != annotated.name.table.names.java_lang_Object) {
-            result = getAnnotation((Symbol)annotated, annoType);
-            if (result != null || !inherited)
-                break;
-            Type sup = annotated.getSuperclass();
-            if (!sup.hasTag(CLASS) || sup.isErroneous())
-                break;
-            annotated = (ClassSymbol) sup.tsym;
-        }
-        return result;
-    }
-
 
     public PackageSymbol getPackageElement(CharSequence name) {
         String strName = name.toString();
@@ -238,8 +198,10 @@ public class JavacElements implements Elements {
         tree.accept(vis);
         if (vis.result == null)
             return null;
+
+        List<Attribute.Compound> annos = sym.getRawAttributes();
         return matchAnnoToTree(cast(Attribute.Compound.class, findme),
-                               sym.getAnnotationMirrors(),
+                               annos,
                                vis.result);
     }
 
@@ -442,7 +404,7 @@ public class JavacElements implements Elements {
      */
     public List<Attribute.Compound> getAllAnnotationMirrors(Element e) {
         Symbol sym = cast(Symbol.class, e);
-        List<Attribute.Compound> annos = sym.getAnnotationMirrors();
+        List<Attribute.Compound> annos = sym.getRawAttributes();
         while (sym.getKind() == ElementKind.CLASS) {
             Type sup = ((ClassSymbol) sym).getSuperclass();
             if (!sup.hasTag(CLASS) || sup.isErroneous() ||
@@ -451,7 +413,8 @@ public class JavacElements implements Elements {
             }
             sym = sup.tsym;
             List<Attribute.Compound> oldAnnos = annos;
-            for (Attribute.Compound anno : sym.getAnnotationMirrors()) {
+            List<Attribute.Compound> newAnnos = sym.getRawAttributes();
+            for (Attribute.Compound anno : newAnnos) {
                 if (isInherited(anno.type) &&
                         !containsAnnoOfType(oldAnnos, anno.type)) {
                     annos = annos.prepend(anno);
@@ -465,11 +428,7 @@ public class JavacElements implements Elements {
      * Tests whether an annotation type is @Inherited.
      */
     private boolean isInherited(Type annotype) {
-        for (Attribute.Compound anno : annotype.tsym.getAnnotationMirrors()) {
-            if (anno.type.tsym == syms.inheritedType.tsym)
-                return true;
-        }
-        return false;
+        return annotype.tsym.attribute(syms.inheritedType.tsym) != null;
     }
 
     /**
@@ -563,6 +522,16 @@ public class JavacElements implements Elements {
 
     public Name getName(CharSequence cs) {
         return names.fromString(cs.toString());
+    }
+
+    @Override
+    public boolean isFunctionalInterface(TypeElement element) {
+        if (element.getKind() != ElementKind.INTERFACE)
+            return false;
+        else {
+            TypeSymbol tsym = cast(TypeSymbol.class, element);
+            return types.isFunctionalInterface(tsym);
+        }
     }
 
     /**

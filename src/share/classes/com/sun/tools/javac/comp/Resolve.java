@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,12 +35,13 @@ import com.sun.tools.javac.comp.DeferredAttr.AttrMode;
 import com.sun.tools.javac.comp.DeferredAttr.DeferredAttrContext;
 import com.sun.tools.javac.comp.DeferredAttr.DeferredType;
 import com.sun.tools.javac.comp.Infer.InferenceContext;
-import com.sun.tools.javac.comp.Infer.InferenceContext.FreeTypeListener;
+import com.sun.tools.javac.comp.Infer.FreeTypeListener;
 import com.sun.tools.javac.comp.Resolve.MethodResolutionContext.Candidate;
 import com.sun.tools.javac.jvm.*;
 import com.sun.tools.javac.tree.*;
 import com.sun.tools.javac.tree.JCTree.*;
 import com.sun.tools.javac.tree.JCTree.JCMemberReference.ReferenceKind;
+import com.sun.tools.javac.tree.JCTree.JCPolyExpression.*;
 import com.sun.tools.javac.util.*;
 import com.sun.tools.javac.util.JCDiagnostic.DiagnosticFlag;
 import com.sun.tools.javac.util.JCDiagnostic.DiagnosticPosition;
@@ -54,7 +55,6 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
-import java.util.Set;
 
 import javax.lang.model.element.ElementVisitor;
 
@@ -92,6 +92,7 @@ public class Resolve {
     public final boolean varargsEnabled; // = source.allowVarargs();
     public final boolean allowMethodHandles;
     public final boolean allowDefaultMethods;
+    public final boolean allowStructuralMostSpecific;
     private final boolean debugResolve;
     final EnumSet<VerboseResolutionMode> verboseResolutionMode;
 
@@ -127,6 +128,7 @@ public class Resolve {
         Target target = Target.instance(context);
         allowMethodHandles = target.hasMethodHandles();
         allowDefaultMethods = source.allowDefaultMethods();
+        allowStructuralMostSpecific = source.allowStructuralMostSpecific();
         polymorphicSignatureScope = new Scope(syms.noSymbol);
 
         inapplicableMethodException = new InapplicableMethodException(diags);
@@ -506,6 +508,7 @@ public class Resolve {
                         List<Type> typeargtypes,
                         boolean allowBoxing,
                         boolean useVarargs,
+                        MethodCheck methodCheck,
                         Warner warn) throws Infer.InferenceException {
 
         Type mt = types.memberType(site, m);
@@ -558,10 +561,11 @@ public class Resolve {
                                     allowBoxing,
                                     useVarargs,
                                     currentResolutionContext,
+                                    methodCheck,
                                     warn);
 
-        checkRawArgumentsAcceptable(env, m, argtypes, mt.getParameterTypes(),
-                                allowBoxing, useVarargs, warn);
+        methodCheck.argumentsAcceptable(env, currentResolutionContext.deferredAttrContext(m, infer.emptyContext, resultInfo, warn),
+                                argtypes, mt.getParameterTypes(), warn);
         return mt;
     }
 
@@ -578,7 +582,7 @@ public class Resolve {
             currentResolutionContext.attrMode = DeferredAttr.AttrMode.CHECK;
             MethodResolutionPhase step = currentResolutionContext.step = env.info.pendingResolutionPhase;
             return rawInstantiate(env, site, m, resultInfo, argtypes, typeargtypes,
-                    step.isBoxingRequired(), step.isVarargsRequired(), warn);
+                    step.isBoxingRequired(), step.isVarargsRequired(), resolveMethodCheck, warn);
         }
         finally {
             currentResolutionContext = prevContext;
@@ -595,80 +599,65 @@ public class Resolve {
                      List<Type> typeargtypes,
                      boolean allowBoxing,
                      boolean useVarargs,
+                     MethodCheck methodCheck,
                      Warner warn) {
         try {
             return rawInstantiate(env, site, m, resultInfo, argtypes, typeargtypes,
-                                  allowBoxing, useVarargs, warn);
+                                  allowBoxing, useVarargs, methodCheck, warn);
         } catch (InapplicableMethodException ex) {
             return null;
         }
     }
 
-    /** Check if a parameter list accepts a list of args.
+    /**
+     * This interface defines an entry point that should be used to perform a
+     * method check. A method check usually consist in determining as to whether
+     * a set of types (actuals) is compatible with another set of types (formals).
+     * Since the notion of compatibility can vary depending on the circumstances,
+     * this interfaces allows to easily add new pluggable method check routines.
      */
-    boolean argumentsAcceptable(Env<AttrContext> env,
-                                Symbol msym,
+    interface MethodCheck {
+        /**
+         * Main method check routine. A method check usually consist in determining
+         * as to whether a set of types (actuals) is compatible with another set of
+         * types (formals). If an incompatibility is found, an unchecked exception
+         * is assumed to be thrown.
+         */
+        void argumentsAcceptable(Env<AttrContext> env,
+                                DeferredAttrContext deferredAttrContext,
                                 List<Type> argtypes,
                                 List<Type> formals,
-                                boolean allowBoxing,
-                                boolean useVarargs,
-                                Warner warn) {
-        try {
-            checkRawArgumentsAcceptable(env, msym, argtypes, formals, allowBoxing, useVarargs, warn);
-            return true;
-        } catch (InapplicableMethodException ex) {
-            return false;
+                                Warner warn);
+    }
+
+    /**
+     * Helper enum defining all method check diagnostics (used by resolveMethodCheck).
+     */
+    enum MethodCheckDiag {
+        /**
+         * Actuals and formals differs in length.
+         */
+        ARITY_MISMATCH("arg.length.mismatch", "infer.arg.length.mismatch"),
+        /**
+         * An actual is incompatible with a formal.
+         */
+        ARG_MISMATCH("no.conforming.assignment.exists", "infer.no.conforming.assignment.exists"),
+        /**
+         * An actual is incompatible with the varargs element type.
+         */
+        VARARG_MISMATCH("varargs.argument.mismatch", "infer.varargs.argument.mismatch"),
+        /**
+         * The varargs element type is inaccessible.
+         */
+        INACCESSIBLE_VARARGS("inaccessible.varargs.type", "inaccessible.varargs.type");
+
+        final String basicKey;
+        final String inferKey;
+
+        MethodCheckDiag(String basicKey, String inferKey) {
+            this.basicKey = basicKey;
+            this.inferKey = inferKey;
         }
-    }
-    /**
-     * A check handler is used by the main method applicability routine in order
-     * to handle specific method applicability failures. It is assumed that a class
-     * implementing this interface should throw exceptions that are a subtype of
-     * InapplicableMethodException (see below). Such exception will terminate the
-     * method applicability check and propagate important info outwards (for the
-     * purpose of generating better diagnostics).
-     */
-    interface MethodCheckHandler {
-        /* The number of actuals and formals differ */
-        InapplicableMethodException arityMismatch();
-        /* An actual argument type does not conform to the corresponding formal type */
-        InapplicableMethodException argumentMismatch(boolean varargs, JCDiagnostic details);
-        /* The element type of a varargs is not accessible in the current context */
-        InapplicableMethodException inaccessibleVarargs(Symbol location, Type expected);
-    }
-
-    /**
-     * Basic method check handler used within Resolve - all methods end up
-     * throwing InapplicableMethodException; a diagnostic fragment that describes
-     * the cause as to why the method is not applicable is set on the exception
-     * before it is thrown.
-     */
-    MethodCheckHandler resolveHandler = new MethodCheckHandler() {
-            public InapplicableMethodException arityMismatch() {
-                return inapplicableMethodException.setMessage("arg.length.mismatch");
-            }
-            public InapplicableMethodException argumentMismatch(boolean varargs, JCDiagnostic details) {
-                String key = varargs ?
-                        "varargs.argument.mismatch" :
-                        "no.conforming.assignment.exists";
-                return inapplicableMethodException.setMessage(key,
-                        details);
-            }
-            public InapplicableMethodException inaccessibleVarargs(Symbol location, Type expected) {
-                return inapplicableMethodException.setMessage("inaccessible.varargs.type",
-                        expected, Kinds.kindName(location), location);
-            }
-    };
-
-    void checkRawArgumentsAcceptable(Env<AttrContext> env,
-                                Symbol msym,
-                                List<Type> argtypes,
-                                List<Type> formals,
-                                boolean allowBoxing,
-                                boolean useVarargs,
-                                Warner warn) {
-        checkRawArgumentsAcceptable(env, msym, currentResolutionContext.attrMode(), infer.emptyContext, argtypes, formals,
-                allowBoxing, useVarargs, warn, resolveHandler);
     }
 
     /**
@@ -689,68 +678,94 @@ public class Resolve {
      *
      * A method check handler (see above) is used in order to report errors.
      */
-    void checkRawArgumentsAcceptable(final Env<AttrContext> env,
-                                Symbol msym,
-                                DeferredAttr.AttrMode mode,
-                                final Infer.InferenceContext inferenceContext,
-                                List<Type> argtypes,
-                                List<Type> formals,
-                                boolean allowBoxing,
-                                boolean useVarargs,
-                                Warner warn,
-                                final MethodCheckHandler handler) {
-        Type varargsFormal = useVarargs ? formals.last() : null;
+    MethodCheck resolveMethodCheck = new MethodCheck() {
+        @Override
+        public void argumentsAcceptable(final Env<AttrContext> env,
+                                    DeferredAttrContext deferredAttrContext,
+                                    List<Type> argtypes,
+                                    List<Type> formals,
+                                    Warner warn) {
+            //should we expand formals?
+            boolean useVarargs = deferredAttrContext.phase.isVarargsRequired();
 
-        if (varargsFormal == null &&
-                argtypes.size() != formals.size()) {
-            throw handler.arityMismatch(); // not enough args
-        }
+            //inference context used during this method check
+            InferenceContext inferenceContext = deferredAttrContext.inferenceContext;
 
-        DeferredAttr.DeferredAttrContext deferredAttrContext =
-                deferredAttr.new DeferredAttrContext(mode, msym, currentResolutionContext.step, inferenceContext);
+            Type varargsFormal = useVarargs ? formals.last() : null;
 
-        while (argtypes.nonEmpty() && formals.head != varargsFormal) {
-            ResultInfo mresult = methodCheckResult(formals.head, allowBoxing, false, inferenceContext, deferredAttrContext, handler, warn);
-            mresult.check(null, argtypes.head);
-            argtypes = argtypes.tail;
-            formals = formals.tail;
-        }
+            if (varargsFormal == null &&
+                    argtypes.size() != formals.size()) {
+                reportMC(MethodCheckDiag.ARITY_MISMATCH, inferenceContext); // not enough args
+            }
 
-        if (formals.head != varargsFormal) {
-            throw handler.arityMismatch(); // not enough args
-        }
-
-        if (useVarargs) {
-            //note: if applicability check is triggered by most specific test,
-            //the last argument of a varargs is _not_ an array type (see JLS 15.12.2.5)
-            final Type elt = types.elemtype(varargsFormal);
-            ResultInfo mresult = methodCheckResult(elt, allowBoxing, true, inferenceContext, deferredAttrContext, handler, warn);
-            while (argtypes.nonEmpty()) {
+            while (argtypes.nonEmpty() && formals.head != varargsFormal) {
+                ResultInfo mresult = methodCheckResult(false, formals.head, deferredAttrContext, warn);
                 mresult.check(null, argtypes.head);
                 argtypes = argtypes.tail;
+                formals = formals.tail;
             }
-            //check varargs element type accessibility
-            varargsAccessible(env, elt, handler, inferenceContext);
-        }
 
-        deferredAttrContext.complete();
-    }
+            if (formals.head != varargsFormal) {
+                reportMC(MethodCheckDiag.ARITY_MISMATCH, inferenceContext); // not enough args
+            }
 
-    void varargsAccessible(final Env<AttrContext> env, final Type t, final Resolve.MethodCheckHandler handler, final InferenceContext inferenceContext) {
-        if (inferenceContext.free(t)) {
-            inferenceContext.addFreeTypeListener(List.of(t), new FreeTypeListener() {
-                @Override
-                public void typesInferred(InferenceContext inferenceContext) {
-                    varargsAccessible(env, inferenceContext.asInstType(t, types), handler, inferenceContext);
+            if (useVarargs) {
+                //note: if applicability check is triggered by most specific test,
+                //the last argument of a varargs is _not_ an array type (see JLS 15.12.2.5)
+                final Type elt = types.elemtype(varargsFormal);
+                ResultInfo mresult = methodCheckResult(true, elt, deferredAttrContext, warn);
+                while (argtypes.nonEmpty()) {
+                    mresult.check(null, argtypes.head);
+                    argtypes = argtypes.tail;
                 }
-            });
-        } else {
-            if (!isAccessible(env, t)) {
-                Symbol location = env.enclClass.sym;
-                throw handler.inaccessibleVarargs(location, t);
+                //check varargs element type accessibility
+                varargsAccessible(env, elt, inferenceContext);
             }
         }
-    }
+
+        private void reportMC(MethodCheckDiag diag, InferenceContext inferenceContext, Object... args) {
+            boolean inferDiag = inferenceContext != infer.emptyContext;
+            InapplicableMethodException ex = inferDiag ?
+                    infer.inferenceException : inapplicableMethodException;
+            if (inferDiag && (!diag.inferKey.equals(diag.basicKey))) {
+                Object[] args2 = new Object[args.length + 1];
+                System.arraycopy(args, 0, args2, 1, args.length);
+                args2[0] = inferenceContext.inferenceVars();
+                args = args2;
+            }
+            throw ex.setMessage(inferDiag ? diag.inferKey : diag.basicKey, args);
+        }
+
+        private void varargsAccessible(final Env<AttrContext> env, final Type t, final InferenceContext inferenceContext) {
+            if (inferenceContext.free(t)) {
+                inferenceContext.addFreeTypeListener(List.of(t), new FreeTypeListener() {
+                    @Override
+                    public void typesInferred(InferenceContext inferenceContext) {
+                        varargsAccessible(env, inferenceContext.asInstType(t), inferenceContext);
+                    }
+                });
+            } else {
+                if (!isAccessible(env, t)) {
+                    Symbol location = env.enclClass.sym;
+                    reportMC(MethodCheckDiag.INACCESSIBLE_VARARGS, inferenceContext, t, Kinds.kindName(location), location);
+                }
+            }
+        }
+
+        private ResultInfo methodCheckResult(final boolean varargsCheck, Type to,
+                final DeferredAttr.DeferredAttrContext deferredAttrContext, Warner rsWarner) {
+            CheckContext checkContext = new MethodCheckContext(!deferredAttrContext.phase.isBoxingRequired(), deferredAttrContext, rsWarner) {
+                MethodCheckDiag methodDiag = varargsCheck ?
+                                 MethodCheckDiag.VARARG_MISMATCH : MethodCheckDiag.ARG_MISMATCH;
+
+                @Override
+                public void report(DiagnosticPosition pos, JCDiagnostic details) {
+                    reportMC(methodDiag, deferredAttrContext.inferenceContext, details);
+                }
+            };
+            return new MethodResultInfo(to, checkContext);
+        }
+    };
 
     /**
      * Check context to be used during method applicability checks. A method check
@@ -758,23 +773,24 @@ public class Resolve {
      */
     abstract class MethodCheckContext implements CheckContext {
 
-        MethodCheckHandler handler;
-        boolean useVarargs;
-        Infer.InferenceContext inferenceContext;
+        boolean strict;
         DeferredAttrContext deferredAttrContext;
         Warner rsWarner;
 
-        public MethodCheckContext(MethodCheckHandler handler, boolean useVarargs,
-                Infer.InferenceContext inferenceContext, DeferredAttrContext deferredAttrContext, Warner rsWarner) {
-            this.handler = handler;
-            this.useVarargs = useVarargs;
-            this.inferenceContext = inferenceContext;
-            this.deferredAttrContext = deferredAttrContext;
-            this.rsWarner = rsWarner;
+        public MethodCheckContext(boolean strict, DeferredAttrContext deferredAttrContext, Warner rsWarner) {
+           this.strict = strict;
+           this.deferredAttrContext = deferredAttrContext;
+           this.rsWarner = rsWarner;
+        }
+
+        public boolean compatible(Type found, Type req, Warner warn) {
+            return strict ?
+                    types.isSubtypeUnchecked(found, deferredAttrContext.inferenceContext.asFree(req), warn) :
+                    types.isConvertible(found, deferredAttrContext.inferenceContext.asFree(req), warn);
         }
 
         public void report(DiagnosticPosition pos, JCDiagnostic details) {
-            throw handler.argumentMismatch(useVarargs, details);
+            throw inapplicableMethodException.setMessage(details);
         }
 
         public Warner checkWarner(DiagnosticPosition pos, Type found, Type req) {
@@ -782,7 +798,7 @@ public class Resolve {
         }
 
         public InferenceContext inferenceContext() {
-            return inferenceContext;
+            return deferredAttrContext.inferenceContext;
         }
 
         public DeferredAttrContext deferredAttrContext() {
@@ -791,56 +807,13 @@ public class Resolve {
     }
 
     /**
-     * Subclass of method check context class that implements strict method conversion.
-     * Strict method conversion checks compatibility between types using subtyping tests.
+     * ResultInfo class to be used during method applicability checks. Check
+     * for deferred types goes through special path.
      */
-    class StrictMethodContext extends MethodCheckContext {
-
-        public StrictMethodContext(MethodCheckHandler handler, boolean useVarargs,
-                Infer.InferenceContext inferenceContext, DeferredAttrContext deferredAttrContext, Warner rsWarner) {
-            super(handler, useVarargs, inferenceContext, deferredAttrContext, rsWarner);
-        }
-
-        public boolean compatible(Type found, Type req, Warner warn) {
-            return types.isSubtypeUnchecked(found, inferenceContext.asFree(req, types), warn);
-        }
-    }
-
-    /**
-     * Subclass of method check context class that implements loose method conversion.
-     * Loose method conversion checks compatibility between types using method conversion tests.
-     */
-    class LooseMethodContext extends MethodCheckContext {
-
-        public LooseMethodContext(MethodCheckHandler handler, boolean useVarargs,
-                Infer.InferenceContext inferenceContext, DeferredAttrContext deferredAttrContext, Warner rsWarner) {
-            super(handler, useVarargs, inferenceContext, deferredAttrContext, rsWarner);
-        }
-
-        public boolean compatible(Type found, Type req, Warner warn) {
-            return types.isConvertible(found, inferenceContext.asFree(req, types), warn);
-        }
-    }
-
-    /**
-     * Create a method check context to be used during method applicability check
-     */
-    ResultInfo methodCheckResult(Type to, boolean allowBoxing, boolean useVarargs,
-            Infer.InferenceContext inferenceContext, DeferredAttr.DeferredAttrContext deferredAttrContext,
-            MethodCheckHandler methodHandler, Warner rsWarner) {
-        MethodCheckContext checkContext = allowBoxing ?
-                new LooseMethodContext(methodHandler, useVarargs, inferenceContext, deferredAttrContext, rsWarner) :
-                new StrictMethodContext(methodHandler, useVarargs, inferenceContext, deferredAttrContext, rsWarner);
-        return new MethodResultInfo(to, checkContext, deferredAttrContext);
-    }
-
     class MethodResultInfo extends ResultInfo {
 
-        DeferredAttr.DeferredAttrContext deferredAttrContext;
-
-        public MethodResultInfo(Type pt, CheckContext checkContext, DeferredAttr.DeferredAttrContext deferredAttrContext) {
+        public MethodResultInfo(Type pt, CheckContext checkContext) {
             attr.super(VAL, pt, checkContext);
-            this.deferredAttrContext = deferredAttrContext;
         }
 
         @Override
@@ -855,12 +828,219 @@ public class Resolve {
 
         @Override
         protected MethodResultInfo dup(Type newPt) {
-            return new MethodResultInfo(newPt, checkContext, deferredAttrContext);
+            return new MethodResultInfo(newPt, checkContext);
         }
 
         @Override
         protected ResultInfo dup(CheckContext newContext) {
-            return new MethodResultInfo(pt, newContext, deferredAttrContext);
+            return new MethodResultInfo(pt, newContext);
+        }
+    }
+
+    /**
+     * Most specific method applicability routine. Given a list of actual types A,
+     * a list of formal types F1, and a list of formal types F2, the routine determines
+     * as to whether the types in F1 can be considered more specific than those in F2 w.r.t.
+     * argument types A.
+     */
+    class MostSpecificCheck implements MethodCheck {
+
+        boolean strict;
+        List<Type> actuals;
+
+        MostSpecificCheck(boolean strict, List<Type> actuals) {
+            this.strict = strict;
+            this.actuals = actuals;
+        }
+
+        @Override
+        public void argumentsAcceptable(final Env<AttrContext> env,
+                                    DeferredAttrContext deferredAttrContext,
+                                    List<Type> formals1,
+                                    List<Type> formals2,
+                                    Warner warn) {
+            formals2 = adjustArgs(formals2, deferredAttrContext.msym, formals1.length(), deferredAttrContext.phase.isVarargsRequired());
+            while (formals2.nonEmpty()) {
+                ResultInfo mresult = methodCheckResult(formals2.head, deferredAttrContext, warn, actuals.head);
+                mresult.check(null, formals1.head);
+                formals1 = formals1.tail;
+                formals2 = formals2.tail;
+                actuals = actuals.isEmpty() ? actuals : actuals.tail;
+            }
+        }
+
+       /**
+        * Create a method check context to be used during the most specific applicability check
+        */
+        ResultInfo methodCheckResult(Type to, DeferredAttr.DeferredAttrContext deferredAttrContext,
+               Warner rsWarner, Type actual) {
+           return attr.new ResultInfo(Kinds.VAL, to,
+                   new MostSpecificCheckContext(strict, deferredAttrContext, rsWarner, actual));
+        }
+
+        /**
+         * Subclass of method check context class that implements most specific
+         * method conversion. If the actual type under analysis is a deferred type
+         * a full blown structural analysis is carried out.
+         */
+        class MostSpecificCheckContext extends MethodCheckContext {
+
+            Type actual;
+
+            public MostSpecificCheckContext(boolean strict, DeferredAttrContext deferredAttrContext, Warner rsWarner, Type actual) {
+                super(strict, deferredAttrContext, rsWarner);
+                this.actual = actual;
+            }
+
+            public boolean compatible(Type found, Type req, Warner warn) {
+                if (!allowStructuralMostSpecific || actual == null) {
+                    return super.compatible(found, req, warn);
+                } else {
+                    switch (actual.getTag()) {
+                        case DEFERRED:
+                            DeferredType dt = (DeferredType) actual;
+                            DeferredType.SpeculativeCache.Entry e = dt.speculativeCache.get(deferredAttrContext.msym, deferredAttrContext.phase);
+                            return (e == null || e.speculativeTree == deferredAttr.stuckTree)
+                                    ? false : mostSpecific(found, req, e.speculativeTree, warn);
+                        default:
+                            return standaloneMostSpecific(found, req, actual, warn);
+                    }
+                }
+            }
+
+            private boolean mostSpecific(Type t, Type s, JCTree tree, Warner warn) {
+                MostSpecificChecker msc = new MostSpecificChecker(t, s, warn);
+                msc.scan(tree);
+                return msc.result;
+            }
+
+            boolean polyMostSpecific(Type t1, Type t2, Warner warn) {
+                return (!t1.isPrimitive() && t2.isPrimitive())
+                        ? true : super.compatible(t1, t2, warn);
+            }
+
+            boolean standaloneMostSpecific(Type t1, Type t2, Type exprType, Warner warn) {
+                return (exprType.isPrimitive() == t1.isPrimitive()
+                        && exprType.isPrimitive() != t2.isPrimitive())
+                        ? true : super.compatible(t1, t2, warn);
+            }
+
+            /**
+             * Structural checker for most specific.
+             */
+            class MostSpecificChecker extends DeferredAttr.PolyScanner {
+
+                final Type t;
+                final Type s;
+                final Warner warn;
+                boolean result;
+
+                MostSpecificChecker(Type t, Type s, Warner warn) {
+                    this.t = t;
+                    this.s = s;
+                    this.warn = warn;
+                    result = true;
+                }
+
+                @Override
+                void skip(JCTree tree) {
+                    result &= standaloneMostSpecific(t, s, tree.type, warn);
+                }
+
+                @Override
+                public void visitConditional(JCConditional tree) {
+                    if (tree.polyKind == PolyKind.STANDALONE) {
+                        result &= standaloneMostSpecific(t, s, tree.type, warn);
+                    } else {
+                        super.visitConditional(tree);
+                    }
+                }
+
+                @Override
+                public void visitApply(JCMethodInvocation tree) {
+                    result &= (tree.polyKind == PolyKind.STANDALONE)
+                            ? standaloneMostSpecific(t, s, tree.type, warn)
+                            : polyMostSpecific(t, s, warn);
+                }
+
+                @Override
+                public void visitNewClass(JCNewClass tree) {
+                    result &= (tree.polyKind == PolyKind.STANDALONE)
+                            ? standaloneMostSpecific(t, s, tree.type, warn)
+                            : polyMostSpecific(t, s, warn);
+                }
+
+                @Override
+                public void visitReference(JCMemberReference tree) {
+                    if (types.isFunctionalInterface(t.tsym) &&
+                            types.isFunctionalInterface(s.tsym) &&
+                            types.asSuper(t, s.tsym) == null &&
+                            types.asSuper(s, t.tsym) == null) {
+                        Type desc_t = types.findDescriptorType(t);
+                        Type desc_s = types.findDescriptorType(s);
+                        if (types.isSameTypes(desc_t.getParameterTypes(), desc_s.getParameterTypes())) {
+                            if (!desc_s.getReturnType().hasTag(VOID)) {
+                                //perform structural comparison
+                                Type ret_t = desc_t.getReturnType();
+                                Type ret_s = desc_s.getReturnType();
+                                result &= ((tree.refPolyKind == PolyKind.STANDALONE)
+                                        ? standaloneMostSpecific(ret_t, ret_s, tree.sym.type.getReturnType(), warn)
+                                        : polyMostSpecific(ret_t, ret_s, warn));
+                            } else {
+                                return;
+                            }
+                        } else {
+                            result &= false;
+                        }
+                    } else {
+                        result &= MostSpecificCheckContext.super.compatible(t, s, warn);
+                    }
+                }
+
+                @Override
+                public void visitLambda(JCLambda tree) {
+                    if (types.isFunctionalInterface(t.tsym) &&
+                            types.isFunctionalInterface(s.tsym) &&
+                            types.asSuper(t, s.tsym) == null &&
+                            types.asSuper(s, t.tsym) == null) {
+                        Type desc_t = types.findDescriptorType(t);
+                        Type desc_s = types.findDescriptorType(s);
+                        if (tree.paramKind == JCLambda.ParameterKind.EXPLICIT
+                                || types.isSameTypes(desc_t.getParameterTypes(), desc_s.getParameterTypes())) {
+                            if (!desc_s.getReturnType().hasTag(VOID)) {
+                                //perform structural comparison
+                                Type ret_t = desc_t.getReturnType();
+                                Type ret_s = desc_s.getReturnType();
+                                scanLambdaBody(tree, ret_t, ret_s);
+                            } else {
+                                return;
+                            }
+                        } else {
+                            result &= false;
+                        }
+                    } else {
+                        result &= MostSpecificCheckContext.super.compatible(t, s, warn);
+                    }
+                }
+                //where
+
+                void scanLambdaBody(JCLambda lambda, final Type t, final Type s) {
+                    if (lambda.getBodyKind() == JCTree.JCLambda.BodyKind.EXPRESSION) {
+                        result &= MostSpecificCheckContext.this.mostSpecific(t, s, lambda.body, warn);
+                    } else {
+                        DeferredAttr.LambdaReturnScanner lambdaScanner =
+                                new DeferredAttr.LambdaReturnScanner() {
+                                    @Override
+                                    public void visitReturn(JCReturn tree) {
+                                        if (tree.expr != null) {
+                                            result &= MostSpecificCheckContext.this.mostSpecific(t, s, tree.expr, warn);
+                                        }
+                                    }
+                                };
+                        lambdaScanner.scan(lambda.body);
+                    }
+                }
+            }
         }
     }
 
@@ -1064,14 +1244,17 @@ public class Resolve {
                       boolean useVarargs,
                       boolean operator) {
         if (sym.kind == ERR ||
-                !sym.isInheritedIn(site.tsym, types) ||
-                (useVarargs && (sym.flags() & VARARGS) == 0)) {
+                !sym.isInheritedIn(site.tsym, types)) {
             return bestSoFar;
+        } else if (useVarargs && (sym.flags() & VARARGS) == 0) {
+            return bestSoFar.kind >= ERRONEOUS ?
+                    new BadVarargsMethod((ResolveError)bestSoFar) :
+                    bestSoFar;
         }
         Assert.check(sym.kind < AMBIGUOUS);
         try {
             Type mt = rawInstantiate(env, site, sym, null, argtypes, typeargtypes,
-                               allowBoxing, useVarargs, types.noWarnings);
+                               allowBoxing, useVarargs, resolveMethodCheck, types.noWarnings);
             if (!operator)
                 currentResolutionContext.addApplicableCandidate(sym, mt);
         } catch (InapplicableMethodException ex) {
@@ -1151,196 +1334,50 @@ public class Resolve {
                 if (m1Abstract && !m2Abstract) return m2;
                 if (m2Abstract && !m1Abstract) return m1;
                 // both abstract or both concrete
-                if (!m1Abstract && !m2Abstract)
-                    return ambiguityError(m1, m2);
-                // check that both signatures have the same erasure
-                if (!types.isSameTypes(m1.erasure(types).getParameterTypes(),
-                                       m2.erasure(types).getParameterTypes()))
-                    return ambiguityError(m1, m2);
-                // both abstract, neither overridden; merge throws clause and result type
-                Type mst = mostSpecificReturnType(mt1, mt2);
-                if (mst == null) {
-                    // Theoretically, this can't happen, but it is possible
-                    // due to error recovery or mixing incompatible class files
-                    return ambiguityError(m1, m2);
-                }
-                Symbol mostSpecific = mst == mt1 ? m1 : m2;
-                List<Type> allThrown = chk.intersect(mt1.getThrownTypes(), mt2.getThrownTypes());
-                Type newSig = types.createMethodTypeWithThrown(mostSpecific.type, allThrown);
-                MethodSymbol result = new MethodSymbol(
-                        mostSpecific.flags(),
-                        mostSpecific.name,
-                        newSig,
-                        mostSpecific.owner) {
-                    @Override
-                    public MethodSymbol implementation(TypeSymbol origin, Types types, boolean checkResult) {
-                        if (origin == site.tsym)
-                            return this;
-                        else
-                            return super.implementation(origin, types, checkResult);
-                        }
-                    };
-                return result;
+                return ambiguityError(m1, m2);
             }
             if (m1SignatureMoreSpecific) return m1;
             if (m2SignatureMoreSpecific) return m2;
             return ambiguityError(m1, m2);
         case AMBIGUOUS:
+            //check if m1 is more specific than all ambiguous methods in m2
             AmbiguityError e = (AmbiguityError)m2;
-            Symbol err1 = mostSpecific(argtypes, m1, e.sym, env, site, allowBoxing, useVarargs);
-            Symbol err2 = mostSpecific(argtypes, m1, e.sym2, env, site, allowBoxing, useVarargs);
-            if (err1 == err2) return err1;
-            if (err1 == e.sym && err2 == e.sym2) return m2;
-            if (err1 instanceof AmbiguityError &&
-                err2 instanceof AmbiguityError &&
-                ((AmbiguityError)err1).sym == ((AmbiguityError)err2).sym)
-                return ambiguityError(m1, m2);
-            else
-                return ambiguityError(err1, err2);
+            for (Symbol s : e.ambiguousSyms) {
+                if (mostSpecific(argtypes, m1, s, env, site, allowBoxing, useVarargs) != m1) {
+                    return e.addAmbiguousSymbol(m1);
+                }
+            }
+            return m1;
         default:
             throw new AssertionError();
         }
     }
     //where
     private boolean signatureMoreSpecific(List<Type> actuals, Env<AttrContext> env, Type site, Symbol m1, Symbol m2, boolean allowBoxing, boolean useVarargs) {
-        Symbol m12 = adjustVarargs(m1, m2, useVarargs);
-        Symbol m22 = adjustVarargs(m2, m1, useVarargs);
-        Type mtype1 = types.memberType(site, m12);
-        Type mtype2 = types.memberType(site, m22);
-
-        //check if invocation is more specific
-        if (invocationMoreSpecific(env, site, m22, mtype1.getParameterTypes(), allowBoxing, useVarargs)) {
-            return true;
-        }
-
-        //perform structural check
-
-        List<Type> formals1 = mtype1.getParameterTypes();
-        Type lastFormal1 = formals1.last();
-        List<Type> formals2 = mtype2.getParameterTypes();
-        Type lastFormal2 = formals2.last();
-        ListBuffer<Type> newFormals = ListBuffer.lb();
-
-        boolean hasStructuralPoly = false;
-        for (Type actual : actuals) {
-            //perform formal argument adaptation in case actuals > formals (varargs)
-            Type f1 = formals1.isEmpty() ?
-                    lastFormal1 : formals1.head;
-            Type f2 = formals2.isEmpty() ?
-                    lastFormal2 : formals2.head;
-
-            //is this a structural actual argument?
-            boolean isStructuralPoly = actual.hasTag(DEFERRED) &&
-                    (((DeferredType)actual).tree.hasTag(LAMBDA) ||
-                    ((DeferredType)actual).tree.hasTag(REFERENCE));
-
-            Type newFormal = f1;
-
-            if (isStructuralPoly) {
-                //for structural arguments only - check that corresponding formals
-                //are related - if so replace formal with <null>
-                hasStructuralPoly = true;
-                DeferredType dt = (DeferredType)actual;
-                Type t1 = deferredAttr.new DeferredTypeMap(AttrMode.SPECULATIVE, m1, currentResolutionContext.step).apply(dt);
-                Type t2 = deferredAttr.new DeferredTypeMap(AttrMode.SPECULATIVE, m2, currentResolutionContext.step).apply(dt);
-                if (t1.isErroneous() || t2.isErroneous() || !isStructuralSubtype(t1, t2)) {
-                    //not structural subtypes - simply fail
-                    return false;
-                } else {
-                    newFormal = syms.botType;
-                }
-            }
-
-            newFormals.append(newFormal);
-            if (newFormals.length() > mtype2.getParameterTypes().length()) {
-                //expand m2's type so as to fit the new formal arity (varargs)
-                m22.type = types.createMethodTypeWithParameters(m22.type, m22.type.getParameterTypes().append(f2));
-            }
-
-            formals1 = formals1.isEmpty() ? formals1 : formals1.tail;
-            formals2 = formals2.isEmpty() ? formals2 : formals2.tail;
-        }
-
-        if (!hasStructuralPoly) {
-            //if no structural actual was found, we're done
-            return false;
-        }
-        //perform additional adaptation if actuals < formals (varargs)
-        for (Type t : formals1) {
-            newFormals.append(t);
-        }
-        //check if invocation (with tweaked args) is more specific
-        return invocationMoreSpecific(env, site, m22, newFormals.toList(), allowBoxing, useVarargs);
-    }
-    //where
-    private boolean invocationMoreSpecific(Env<AttrContext> env, Type site, Symbol m2, List<Type> argtypes1, boolean allowBoxing, boolean useVarargs) {
         noteWarner.clear();
+        int maxLength = Math.max(
+                            Math.max(m1.type.getParameterTypes().length(), actuals.length()),
+                            m2.type.getParameterTypes().length());
         Type mst = instantiate(env, site, m2, null,
-                types.lowerBounds(argtypes1), null,
-                allowBoxing, false, noteWarner);
+                adjustArgs(types.lowerBounds(types.memberType(site, m1).getParameterTypes()), m1, maxLength, useVarargs), null,
+                allowBoxing, useVarargs, new MostSpecificCheck(!allowBoxing, actuals), noteWarner);
         return mst != null &&
                 !noteWarner.hasLint(Lint.LintCategory.UNCHECKED);
     }
-    //where
-    private Symbol adjustVarargs(Symbol to, Symbol from, boolean useVarargs) {
-        List<Type> fromArgs = from.type.getParameterTypes();
-        List<Type> toArgs = to.type.getParameterTypes();
-        if (useVarargs &&
-                (from.flags() & VARARGS) != 0 &&
-                (to.flags() & VARARGS) != 0) {
-            Type varargsTypeFrom = fromArgs.last();
-            Type varargsTypeTo = toArgs.last();
-            ListBuffer<Type> args = ListBuffer.lb();
-            if (toArgs.length() < fromArgs.length()) {
-                //if we are checking a varargs method 'from' against another varargs
-                //method 'to' (where arity of 'to' < arity of 'from') then expand signature
-                //of 'to' to 'fit' arity of 'from' (this means adding fake formals to 'to'
-                //until 'to' signature has the same arity as 'from')
-                while (fromArgs.head != varargsTypeFrom) {
-                    args.append(toArgs.head == varargsTypeTo ? types.elemtype(varargsTypeTo) : toArgs.head);
-                    fromArgs = fromArgs.tail;
-                    toArgs = toArgs.head == varargsTypeTo ?
-                        toArgs :
-                        toArgs.tail;
-                }
-            } else {
-                //formal argument list is same as original list where last
-                //argument (array type) is removed
-                args.appendList(toArgs.reverse().tail.reverse());
+    private List<Type> adjustArgs(List<Type> args, Symbol msym, int length, boolean allowVarargs) {
+        if ((msym.flags() & VARARGS) != 0 && allowVarargs) {
+            Type varargsElem = types.elemtype(args.last());
+            if (varargsElem == null) {
+                Assert.error("Bad varargs = " + args.last() + " " + msym);
             }
-            //append varargs element type as last synthetic formal
-            args.append(types.elemtype(varargsTypeTo));
-            Type mtype = types.createMethodTypeWithParameters(to.type, args.toList());
-            return new MethodSymbol(to.flags_field & ~VARARGS, to.name, mtype, to.owner);
+            List<Type> newArgs = args.reverse().tail.prepend(varargsElem).reverse();
+            while (newArgs.length() < length) {
+                newArgs = newArgs.append(newArgs.last());
+            }
+            return newArgs;
         } else {
-            return to;
+            return args;
         }
-    }
-    //where
-    boolean isStructuralSubtype(Type s, Type t) {
-
-        Type ret_s = types.findDescriptorType(s).getReturnType();
-        Type ret_t = types.findDescriptorType(t).getReturnType();
-
-        //covariant most specific check for function descriptor return type
-        if (!types.isSubtype(ret_s, ret_t)) {
-            return false;
-        }
-
-        List<Type> args_s = types.findDescriptorType(s).getParameterTypes();
-        List<Type> args_t = types.findDescriptorType(t).getParameterTypes();
-
-        //arity must be identical
-        if (args_s.length() != args_t.length()) {
-            return false;
-        }
-
-        //invariant most specific check for function descriptor parameter types
-        if (!types.isSameTypes(args_t, args_s)) {
-            return false;
-        }
-
-        return true;
     }
     //where
     Type mostSpecificReturnType(Type mt1, Type mt2) {
@@ -2366,9 +2403,11 @@ public class Resolve {
         try {
             currentResolutionContext = new MethodResolutionContext();
             Name name = treeinfo.operatorName(optag);
+            env.info.pendingResolutionPhase = currentResolutionContext.step = BASIC;
             Symbol sym = findMethod(env, syms.predefClass.type, name, argtypes,
                                     null, false, false, true);
             if (boxingEnabled && sym.kind >= WRONG_MTHS)
+                env.info.pendingResolutionPhase = currentResolutionContext.step = BOX;
                 sym = findMethod(env, syms.predefClass.type, name, argtypes,
                                  null, true, false, true);
             return accessMethod(sym, pos, env.enclClass.sym.type, name,
@@ -2438,10 +2477,23 @@ public class Resolve {
                                   List<Type> typeargtypes,
                                   boolean boxingAllowed) {
         MethodResolutionPhase maxPhase = boxingAllowed ? VARARITY : BASIC;
+
+        ReferenceLookupHelper boundLookupHelper;
+        if (!name.equals(names.init)) {
+            //method reference
+            boundLookupHelper =
+                    new MethodReferenceLookupHelper(referenceTree, name, site, argtypes, typeargtypes, maxPhase);
+        } else if (site.hasTag(ARRAY)) {
+            //array constructor reference
+            boundLookupHelper =
+                    new ArrayConstructorReferenceLookupHelper(referenceTree, site, argtypes, typeargtypes, maxPhase);
+        } else {
+            //class constructor reference
+            boundLookupHelper =
+                    new ConstructorReferenceLookupHelper(referenceTree, site, argtypes, typeargtypes, maxPhase);
+        }
+
         //step 1 - bound lookup
-        ReferenceLookupHelper boundLookupHelper = name.equals(names.init) ?
-                new ConstructorReferenceLookupHelper(referenceTree, site, argtypes, typeargtypes, maxPhase) :
-                new MethodReferenceLookupHelper(referenceTree, name, site, argtypes, typeargtypes, maxPhase);
         Env<AttrContext> boundEnv = env.dup(env.tree, env.info.dup());
         Symbol boundSym = lookupMethod(boundEnv, env.tree.pos(), site.tsym, boundLookupHelper);
 
@@ -2452,10 +2504,10 @@ public class Resolve {
 
         //merge results
         Pair<Symbol, ReferenceLookupHelper> res;
-        if (unboundSym.kind != MTH) {
+        if (!lookupSuccess(unboundSym)) {
             res = new Pair<Symbol, ReferenceLookupHelper>(boundSym, boundLookupHelper);
             env.info.pendingResolutionPhase = boundEnv.info.pendingResolutionPhase;
-        } else if (boundSym.kind == MTH) {
+        } else if (lookupSuccess(boundSym)) {
             res = new Pair<Symbol, ReferenceLookupHelper>(ambiguityError(boundSym, unboundSym), boundLookupHelper);
             env.info.pendingResolutionPhase = boundEnv.info.pendingResolutionPhase;
         } else {
@@ -2465,6 +2517,10 @@ public class Resolve {
 
         return res;
     }
+    //private
+        boolean lookupSuccess(Symbol s) {
+            return s.kind == MTH || s.kind == AMBIGUOUS;
+        }
 
     /**
      * Helper for defining custom method-like lookup logic; a lookup helper
@@ -2524,6 +2580,10 @@ public class Resolve {
 
         @Override
         Symbol access(Env<AttrContext> env, DiagnosticPosition pos, Symbol location, Symbol sym) {
+            if (sym.kind == AMBIGUOUS) {
+                AmbiguityError a_err = (AmbiguityError)sym;
+                sym = a_err.mergeAbstracts(site);
+            }
             if (sym.kind >= AMBIGUOUS) {
                 //if nothing is found return the 'first' error
                 sym = accessMethod(sym, pos, location, site, name, true, argtypes, typeargtypes);
@@ -2579,6 +2639,10 @@ public class Resolve {
         abstract JCMemberReference.ReferenceKind referenceKind(Symbol sym);
 
         Symbol access(Env<AttrContext> env, DiagnosticPosition pos, Symbol location, Symbol sym) {
+            if (sym.kind == AMBIGUOUS) {
+                AmbiguityError a_err = (AmbiguityError)sym;
+                sym = a_err.mergeAbstracts(site);
+            }
             //skip error reporting
             return sym;
         }
@@ -2597,20 +2661,10 @@ public class Resolve {
             super(referenceTree, name, site, argtypes, typeargtypes, maxPhase);
         }
 
-        protected Symbol lookupReferenceInternal(Env<AttrContext> env, MethodResolutionPhase phase) {
-            return findMethod(env, site, name, argtypes, typeargtypes,
-                    phase.isBoxingRequired(), phase.isVarargsRequired(), syms.operatorNames.contains(name));
-        }
-
-        protected Symbol adjustLookupResult(Env<AttrContext> env, Symbol sym) {
-            return !TreeInfo.isStaticSelector(referenceTree.expr, names) ||
-                        sym.kind != MTH ||
-                        sym.isStatic() ? sym : new StaticError(sym);
-        }
-
         @Override
         final Symbol lookup(Env<AttrContext> env, MethodResolutionPhase phase) {
-            return adjustLookupResult(env, lookupReferenceInternal(env, phase));
+            return findMethod(env, site, name, argtypes, typeargtypes,
+                    phase.isBoxingRequired(), phase.isVarargsRequired(), syms.operatorNames.contains(name));
         }
 
         @Override
@@ -2649,14 +2703,11 @@ public class Resolve {
 
         UnboundMethodReferenceLookupHelper(JCMemberReference referenceTree, Name name, Type site,
                 List<Type> argtypes, List<Type> typeargtypes, MethodResolutionPhase maxPhase) {
-            super(referenceTree, name,
-                    site.isRaw() ? types.asSuper(argtypes.head, site.tsym) : site,
-                    argtypes.tail, typeargtypes, maxPhase);
-        }
-
-        @Override
-        protected Symbol adjustLookupResult(Env<AttrContext> env, Symbol sym) {
-            return sym.kind != MTH || !sym.isStatic() ? sym : new StaticError(sym);
+            super(referenceTree, name, site, argtypes.tail, typeargtypes, maxPhase);
+            Type asSuperSite = types.asSuper(argtypes.head, site.tsym);
+            if (site.isRaw() && !asSuperSite.isErroneous()) {
+                this.site = asSuperSite;
+            }
         }
 
         @Override
@@ -2667,6 +2718,33 @@ public class Resolve {
         @Override
         ReferenceKind referenceKind(Symbol sym) {
             return ReferenceKind.UNBOUND;
+        }
+    }
+
+    /**
+     * Helper class for array constructor lookup; an array constructor lookup
+     * is simulated by looking up a method that returns the array type specified
+     * as qualifier, and that accepts a single int parameter (size of the array).
+     */
+    class ArrayConstructorReferenceLookupHelper extends ReferenceLookupHelper {
+
+        ArrayConstructorReferenceLookupHelper(JCMemberReference referenceTree, Type site, List<Type> argtypes,
+                List<Type> typeargtypes, MethodResolutionPhase maxPhase) {
+            super(referenceTree, names.init, site, argtypes, typeargtypes, maxPhase);
+        }
+
+        @Override
+        protected Symbol lookup(Env<AttrContext> env, MethodResolutionPhase phase) {
+            Scope sc = new Scope(syms.arrayClass);
+            MethodSymbol arrayConstr = new MethodSymbol(PUBLIC, name, null, site.tsym);
+            arrayConstr.type = new MethodType(List.of(syms.intType), site, List.<Type>nil(), syms.methodClass);
+            sc.enter(arrayConstr);
+            return findMethodInScope(env, site, name, argtypes, typeargtypes, sc, methodNotFound, phase.isBoxingRequired(), phase.isVarargsRequired(), false, false);
+        }
+
+        @Override
+        ReferenceKind referenceKind(Symbol sym) {
+            return ReferenceKind.ARRAY_CTOR;
         }
     }
 
@@ -3014,9 +3092,7 @@ public class Resolve {
 
         @Override
         public Symbol access(Name name, TypeSymbol location) {
-            if (sym.kind >= AMBIGUOUS)
-                return ((ResolveError)sym).access(name, location);
-            else if ((sym.kind & ERRONEOUS) == 0 && (sym.kind & TYP) != 0)
+            if ((sym.kind & ERRONEOUS) == 0 && (sym.kind & TYP) != 0)
                 return types.createErrorType(name, location, sym.type).tsym;
             else
                 return sym;
@@ -3338,14 +3414,32 @@ public class Resolve {
      * (either methods, constructors or operands) are ambiguous
      * given an actual arguments/type argument list.
      */
-    class AmbiguityError extends InvalidSymbolError {
+    class AmbiguityError extends ResolveError {
 
         /** The other maximally specific symbol */
-        Symbol sym2;
+        List<Symbol> ambiguousSyms = List.nil();
+
+        @Override
+        public boolean exists() {
+            return true;
+        }
 
         AmbiguityError(Symbol sym1, Symbol sym2) {
-            super(AMBIGUOUS, sym1, "ambiguity error");
-            this.sym2 = sym2;
+            super(AMBIGUOUS, "ambiguity error");
+            ambiguousSyms = flatten(sym2).appendList(flatten(sym1));
+        }
+
+        private List<Symbol> flatten(Symbol sym) {
+            if (sym.kind == AMBIGUOUS) {
+                return ((AmbiguityError)sym).ambiguousSyms;
+            } else {
+                return List.of(sym);
+            }
+        }
+
+        AmbiguityError addAmbiguousSymbol(Symbol s) {
+            ambiguousSyms = ambiguousSyms.prepend(s);
+            return this;
         }
 
         @Override
@@ -3356,24 +3450,88 @@ public class Resolve {
                 Name name,
                 List<Type> argtypes,
                 List<Type> typeargtypes) {
-            AmbiguityError pair = this;
-            while (true) {
-                if (pair.sym.kind == AMBIGUOUS)
-                    pair = (AmbiguityError)pair.sym;
-                else if (pair.sym2.kind == AMBIGUOUS)
-                    pair = (AmbiguityError)pair.sym2;
-                else break;
-            }
-            Name sname = pair.sym.name;
-            if (sname == names.init) sname = pair.sym.owner.name;
+            List<Symbol> diagSyms = ambiguousSyms.reverse();
+            Symbol s1 = diagSyms.head;
+            Symbol s2 = diagSyms.tail.head;
+            Name sname = s1.name;
+            if (sname == names.init) sname = s1.owner.name;
             return diags.create(dkind, log.currentSource(),
                       pos, "ref.ambiguous", sname,
-                      kindName(pair.sym),
-                      pair.sym,
-                      pair.sym.location(site, types),
-                      kindName(pair.sym2),
-                      pair.sym2,
-                      pair.sym2.location(site, types));
+                      kindName(s1),
+                      s1,
+                      s1.location(site, types),
+                      kindName(s2),
+                      s2,
+                      s2.location(site, types));
+        }
+
+        /**
+         * If multiple applicable methods are found during overload and none of them
+         * is more specific than the others, attempt to merge their signatures.
+         */
+        Symbol mergeAbstracts(Type site) {
+            Symbol fst = ambiguousSyms.last();
+            Symbol res = fst;
+            for (Symbol s : ambiguousSyms.reverse()) {
+                Type mt1 = types.memberType(site, res);
+                Type mt2 = types.memberType(site, s);
+                if ((s.flags() & ABSTRACT) == 0 ||
+                        !types.overrideEquivalent(mt1, mt2) ||
+                        !types.isSameTypes(fst.erasure(types).getParameterTypes(),
+                                       s.erasure(types).getParameterTypes())) {
+                    //ambiguity cannot be resolved
+                    return this;
+                } else {
+                    Type mst = mostSpecificReturnType(mt1, mt2);
+                    if (mst == null) {
+                        // Theoretically, this can't happen, but it is possible
+                        // due to error recovery or mixing incompatible class files
+                        return this;
+                    }
+                    Symbol mostSpecific = mst == mt1 ? res : s;
+                    List<Type> allThrown = chk.intersect(mt1.getThrownTypes(), mt2.getThrownTypes());
+                    Type newSig = types.createMethodTypeWithThrown(mostSpecific.type, allThrown);
+                    res = new MethodSymbol(
+                            mostSpecific.flags(),
+                            mostSpecific.name,
+                            newSig,
+                            mostSpecific.owner);
+                }
+            }
+            return res;
+        }
+
+        @Override
+        protected Symbol access(Name name, TypeSymbol location) {
+            Symbol firstAmbiguity = ambiguousSyms.last();
+            return firstAmbiguity.kind == TYP ?
+                    types.createErrorType(name, location, firstAmbiguity.type).tsym :
+                    firstAmbiguity;
+        }
+    }
+
+    class BadVarargsMethod extends ResolveError {
+
+        ResolveError delegatedError;
+
+        BadVarargsMethod(ResolveError delegatedError) {
+            super(delegatedError.kind, "badVarargs");
+            this.delegatedError = delegatedError;
+        }
+
+        @Override
+        protected Symbol access(Name name, TypeSymbol location) {
+            return delegatedError.access(name, location);
+        }
+
+        @Override
+        public boolean exists() {
+            return true;
+        }
+
+        @Override
+        JCDiagnostic getDiagnostic(DiagnosticType dkind, DiagnosticPosition pos, Symbol location, Type site, Name name, List<Type> argtypes, List<Type> typeargtypes) {
+            return delegatedError.getDiagnostic(dkind, pos, location, site, name, argtypes, typeargtypes);
         }
     }
 
@@ -3450,6 +3608,10 @@ public class Resolve {
             candidates = candidates.append(c);
         }
 
+        DeferredAttrContext deferredAttrContext(Symbol sym, InferenceContext inferenceContext, ResultInfo pendingResult, Warner warn) {
+            return deferredAttr.new DeferredAttrContext(attrMode, sym, step, inferenceContext, pendingResult != null ? pendingResult.checkContext.deferredAttrContext() : deferredAttr.emptyDeferredAttrContext, warn);
+        }
+
         /**
          * This class represents an overload resolution candidate. There are two
          * kinds of candidates: applicable methods and inapplicable methods;
@@ -3457,6 +3619,7 @@ public class Resolve {
          * while inapplicable candidates contain further details about the
          * reason why the method has been considered inapplicable.
          */
+        @SuppressWarnings("overrides")
         class Candidate {
 
             final MethodResolutionPhase step;

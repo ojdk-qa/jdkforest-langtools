@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -60,7 +60,7 @@ public class ConstructorWriterImpl extends AbstractExecutableMemberWriter
             ClassDoc classDoc) {
         super(writer, classDoc);
         VisibleMemberMap visibleMemberMap = new VisibleMemberMap(classDoc,
-            VisibleMemberMap.CONSTRUCTORS, configuration.nodeprecated);
+            VisibleMemberMap.CONSTRUCTORS, configuration);
         List<ProgramElementDoc> constructors = new ArrayList<ProgramElementDoc>(visibleMemberMap.getMembersFor(classDoc));
         for (int i = 0; i < constructors.size(); i++) {
             if ((constructors.get(i)).isProtected() ||
@@ -137,6 +137,7 @@ public class ConstructorWriterImpl extends AbstractExecutableMemberWriter
             addName(constructor.name(), pre);
         }
         addParameters(constructor, pre);
+        writer.addReceiverAnnotationInfo(constructor, pre);
         addExceptions(constructor, pre);
         return pre;
     }

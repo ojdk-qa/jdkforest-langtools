@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2006, 2013, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,6 +40,7 @@ import com.sun.tools.doclint.DocLint;
 import com.sun.tools.javac.code.Lint;
 import com.sun.tools.javac.code.Source;
 import com.sun.tools.javac.code.Type;
+import com.sun.tools.javac.jvm.Profile;
 import com.sun.tools.javac.jvm.Target;
 import com.sun.tools.javac.processing.JavacProcessingEnvironment;
 import com.sun.tools.javac.util.Log;
@@ -176,6 +177,8 @@ public enum Option {
 
     PROCESSORPATH("-processorpath", "opt.arg.path", "opt.processorpath", STANDARD, FILEMANAGER),
 
+    PARAMETERS("-parameters","opt.parameters", STANDARD, BASIC),
+
     D("-d", "opt.arg.directory", "opt.d", STANDARD, FILEMANAGER),
 
     S("-s", "opt.arg.directory", "opt.sourceDest", STANDARD, FILEMANAGER),
@@ -210,6 +213,18 @@ public enum Option {
             Target target = Target.lookup(operand);
             if (target == null) {
                 helper.error("err.invalid.target", operand);
+                return true;
+            }
+            return super.process(helper, option, operand);
+        }
+    },
+
+    PROFILE("-profile", "opt.arg.profile", "opt.profile", STANDARD, BASIC) {
+        @Override
+        public boolean process(OptionHelper helper, String option, String operand) {
+            Profile profile = Profile.lookup(operand);
+            if (profile == null) {
+                helper.error("err.invalid.profile", operand);
                 return true;
             }
             return super.process(helper, option, operand);
@@ -309,7 +324,7 @@ public enum Option {
 
     // This option exists only for the purpose of documenting itself.
     // It's actually implemented by the launcher.
-    J("-J", "opt.arg.flag", "opt.J", STANDARD, INFO) {
+    J("-J", "opt.arg.flag", "opt.J", STANDARD, INFO, true) {
         @Override
         public boolean process(OptionHelper helper, String option) {
             throw new AssertionError
@@ -414,7 +429,7 @@ public enum Option {
 
     // This option exists only for the purpose of documenting itself.
     // It's actually implemented by the CommandLine class.
-    AT("@", "opt.arg.file", "opt.AT", STANDARD, INFO) {
+    AT("@", "opt.arg.file", "opt.AT", STANDARD, INFO, true) {
         @Override
         public boolean process(OptionHelper helper, String option) {
             throw new AssertionError("the @ flag should be caught by CommandLine.");
