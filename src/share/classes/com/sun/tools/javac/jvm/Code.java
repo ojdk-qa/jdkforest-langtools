@@ -373,6 +373,17 @@ public class Code {
         Assert.check(alive || state.stacksize == 0);
     }
 
+    /** Emit a ldc (or ldc_w) instruction, taking into account operand size
+    */
+    public void emitLdc(int od) {
+        if (od <= 255) {
+            emitop1(ldc1, od);
+        }
+        else {
+            emitop2(ldc2, od);
+        }
+    }
+
     /** Emit a multinewarray instruction.
      */
     public void emitMultianewarray(int ndims, int type, Type arrayType) {
@@ -459,7 +470,15 @@ public class Code {
     public void emitInvokedynamic(int desc, Type mtype) {
         // N.B. this format is under consideration by the JSR 292 EG
         int argsize = width(mtype.getParameterTypes());
-        emitop(invokedynamic);
+        int prevPos = pendingStatPos;
+        try {
+            //disable line number generation (we could have used 'emit1', that
+            //bypasses stackmap generation - which is needed for indy calls)
+            pendingStatPos = Position.NOPOS;
+            emitop(invokedynamic);
+        } finally {
+            pendingStatPos = prevPos;
+        }
         if (!alive) return;
         emit2(desc);
         emit2(0);
@@ -1628,7 +1647,7 @@ public class Code {
         State dup() {
             try {
                 State state = (State)super.clone();
-                state.defined = defined.dup();
+                state.defined = new Bits(defined);
                 state.stack = stack.clone();
                 if (locks != null) state.locks = locks.clone();
                 if (debugCode) {
@@ -1756,7 +1775,7 @@ public class Code {
         }
 
         State join(State other) {
-            defined = defined.andSet(other.defined);
+            defined.andSet(other.defined);
             Assert.check(stacksize == other.stacksize
                     && nlocks == other.nlocks);
             for (int i=0; i<stacksize; ) {
@@ -1868,7 +1887,7 @@ public class Code {
     /** Set the current variable defined state. */
     public void setDefined(Bits newDefined) {
         if (alive && newDefined != state.defined) {
-            Bits diff = state.defined.dup().xorSet(newDefined);
+            Bits diff = new Bits(state.defined).xorSet(newDefined);
             for (int adr = diff.nextBit(0);
                  adr >= 0;
                  adr = diff.nextBit(adr+1)) {
