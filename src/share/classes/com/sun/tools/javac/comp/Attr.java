@@ -94,6 +94,7 @@ public class Attr extends JCTree.Visitor {
     final Annotate annotate;
     final TypeAnnotations typeAnnotations;
     final DeferredLintHandler deferredLintHandler;
+    final TypeEnvs typeEnvs;
 
     public static Attr instance(Context context) {
         Attr instance = context.get(attrKey);
@@ -123,6 +124,7 @@ public class Attr extends JCTree.Visitor {
         annotate = Annotate.instance(context);
         typeAnnotations = TypeAnnotations.instance(context);
         deferredLintHandler = DeferredLintHandler.instance(context);
+        typeEnvs = TypeEnvs.instance(context);
 
         Options options = Options.instance(context);
 
@@ -138,6 +140,7 @@ public class Attr extends JCTree.Visitor {
         allowTypeAnnos = source.allowTypeAnnotations();
         allowLambda = source.allowLambda();
         allowDefaultMethods = source.allowDefaultMethods();
+        allowStaticInterfaceMethods = source.allowStaticInterfaceMethods();
         sourceName = source.name;
         relax = (options.isSet("-retrofit") ||
                  options.isSet("-relax"));
@@ -195,6 +198,10 @@ public class Attr extends JCTree.Visitor {
      */
     boolean allowDefaultMethods;
 
+    /** Switch: static interface methods enabled?
+     */
+    boolean allowStaticInterfaceMethods;
+
     /** Switch: allow references to surrounding object from anonymous
      * objects during constructor call?
      */
@@ -245,36 +252,30 @@ public class Attr extends JCTree.Visitor {
      */
     Type check(final JCTree tree, final Type found, final int ownkind, final ResultInfo resultInfo) {
         InferenceContext inferenceContext = resultInfo.checkContext.inferenceContext();
-        Type owntype = found;
-        if (!owntype.hasTag(ERROR) && !resultInfo.pt.hasTag(METHOD) && !resultInfo.pt.hasTag(FORALL)) {
-            if (allowPoly && inferenceContext.free(found)) {
-                if ((ownkind & ~resultInfo.pkind) == 0) {
-                    owntype = resultInfo.check(tree, inferenceContext.asUndetVar(owntype));
-                } else {
-                    log.error(tree.pos(), "unexpected.type",
-                            kindNames(resultInfo.pkind),
-                            kindName(ownkind));
-                    owntype = types.createErrorType(owntype);
-                }
+        Type owntype;
+        if (!found.hasTag(ERROR) && !resultInfo.pt.hasTag(METHOD) && !resultInfo.pt.hasTag(FORALL)) {
+            if ((ownkind & ~resultInfo.pkind) != 0) {
+                log.error(tree.pos(), "unexpected.type",
+                        kindNames(resultInfo.pkind),
+                        kindName(ownkind));
+                owntype = types.createErrorType(found);
+            } else if (allowPoly && inferenceContext.free(found)) {
+                //delay the check if there are inference variables in the found type
+                //this means we are dealing with a partially inferred poly expression
+                owntype = resultInfo.pt;
                 inferenceContext.addFreeTypeListener(List.of(found, resultInfo.pt), new FreeTypeListener() {
                     @Override
                     public void typesInferred(InferenceContext inferenceContext) {
                         ResultInfo pendingResult =
-                                    resultInfo.dup(inferenceContext.asInstType(resultInfo.pt));
+                                resultInfo.dup(inferenceContext.asInstType(resultInfo.pt));
                         check(tree, inferenceContext.asInstType(found), ownkind, pendingResult);
                     }
                 });
-                return tree.type = resultInfo.pt;
             } else {
-                if ((ownkind & ~resultInfo.pkind) == 0) {
-                    owntype = resultInfo.check(tree, owntype);
-                } else {
-                    log.error(tree.pos(), "unexpected.type",
-                            kindNames(resultInfo.pkind),
-                            kindName(ownkind));
-                    owntype = types.createErrorType(owntype);
-                }
+                owntype = resultInfo.check(tree, found);
             }
+        } else {
+            owntype = found;
         }
         tree.type = owntype;
         return owntype;
@@ -427,7 +428,7 @@ public class Attr extends JCTree.Visitor {
     }
 
     public Type attribType(JCTree node, TypeSymbol sym) {
-        Env<AttrContext> env = enter.typeEnvs.get(sym);
+        Env<AttrContext> env = typeEnvs.get(sym);
         Env<AttrContext> localEnv = env.dup(node, env.info.dup());
         return attribTree(node, localEnv, unknownTypeInfo);
     }
@@ -1175,7 +1176,7 @@ public class Attr extends JCTree.Visitor {
             //the Formal Parameter of a for-each loop is not in the scope when
             //attributing the for-each expression; we mimick this by attributing
             //the for-each expression first (against original scope).
-            Type exprType = types.upperBound(attribExpr(tree.expr, loopEnv));
+            Type exprType = types.cvarUpperBound(attribExpr(tree.expr, loopEnv));
             attribStat(tree.var, loopEnv);
             chk.checkNonVoid(tree.pos(), exprType);
             Type elemtype = types.elemtype(exprType); // perhaps expr is an array?
@@ -1192,7 +1193,7 @@ public class Attr extends JCTree.Visitor {
                     List<Type> iterableParams = base.allparams();
                     elemtype = iterableParams.isEmpty()
                         ? syms.objectType
-                        : types.upperBound(iterableParams.head);
+                        : types.wildUpperBound(iterableParams.head);
                 }
             }
             chk.checkType(tree.expr.pos(), elemtype, tree.var.sym.type);
@@ -2056,7 +2057,7 @@ public class Attr extends JCTree.Visitor {
                 tree.constructor = constructor.baseSymbol();
 
                 final TypeSymbol csym = clazztype.tsym;
-                ResultInfo diamondResult = new ResultInfo(MTH, newMethodTemplate(resultInfo.pt, argtypes, typeargtypes), new Check.NestedCheckContext(resultInfo.checkContext) {
+                ResultInfo diamondResult = new ResultInfo(pkind, newMethodTemplate(resultInfo.pt, argtypes, typeargtypes), new Check.NestedCheckContext(resultInfo.checkContext) {
                     @Override
                     public void report(DiagnosticPosition _unused, JCDiagnostic details) {
                         enclosingContext.report(tree.clazz,
@@ -2328,6 +2329,7 @@ public class Attr extends JCTree.Visitor {
                     currentTarget = infer.instantiateFunctionalInterface(that,
                             currentTarget, explicitParamTypes, resultInfo.checkContext);
                 }
+                currentTarget = types.removeWildcards(currentTarget);
                 lambdaType = types.findDescriptorType(currentTarget);
             } else {
                 currentTarget = Type.recoveryType;
@@ -2720,7 +2722,7 @@ public class Attr extends JCTree.Visitor {
                     resultInfo.checkContext.deferredAttrContext().mode == DeferredAttr.AttrMode.CHECK &&
                     isSerializable(currentTarget);
             if (currentTarget != Type.recoveryType) {
-                currentTarget = targetChecker.visit(currentTarget, that);
+                currentTarget = types.removeWildcards(targetChecker.visit(currentTarget, that));
                 desc = types.findDescriptorType(currentTarget);
             } else {
                 currentTarget = Type.recoveryType;
@@ -2961,10 +2963,19 @@ public class Attr extends JCTree.Visitor {
             if (checkContext.deferredAttrContext().mode == DeferredAttr.AttrMode.CHECK &&
                     pt != Type.recoveryType) {
                 //check that functional interface class is well-formed
-                ClassSymbol csym = types.makeFunctionalInterfaceClass(env,
-                        names.empty, List.of(fExpr.targets.head), ABSTRACT);
-                if (csym != null) {
-                    chk.checkImplementations(env.tree, csym, csym);
+                try {
+                    /* Types.makeFunctionalInterfaceClass() may throw an exception
+                     * when it's executed post-inference. See the listener code
+                     * above.
+                     */
+                    ClassSymbol csym = types.makeFunctionalInterfaceClass(env,
+                            names.empty, List.of(fExpr.targets.head), ABSTRACT);
+                    if (csym != null) {
+                        chk.checkImplementations(env.tree, csym, csym);
+                    }
+                } catch (Types.FunctionDescriptorLookupError ex) {
+                    JCDiagnostic cause = ex.getDiagnostic();
+                    resultInfo.checkContext.report(env.tree, cause);
                 }
             }
         }
@@ -3322,6 +3333,10 @@ public class Attr extends JCTree.Visitor {
                     rs.accessBase(rs.new StaticError(sym),
                               tree.pos(), site, sym.name, true);
                 }
+            }
+            if (!allowStaticInterfaceMethods && sitesym.isInterface() &&
+                    sym.isStatic() && sym.kind == MTH) {
+                log.error(tree.pos(), "static.intf.method.invoke.not.supported.in.source", sourceName);
             }
         } else if (sym.kind != ERR && (sym.flags() & STATIC) != 0 && sym.name != names._class) {
             // If the qualified item is not a type and the selected item is static, report
@@ -4042,7 +4057,7 @@ public class Attr extends JCTree.Visitor {
             // ... and attribute the bound class
             c.flags_field |= UNATTRIBUTED;
             Env<AttrContext> cenv = enter.classEnv(cd, env);
-            enter.typeEnvs.put(c, cenv);
+            typeEnvs.put(c, cenv);
             attribClass(c);
             return owntype;
         }
@@ -4192,9 +4207,9 @@ public class Attr extends JCTree.Visitor {
             c.flags_field &= ~UNATTRIBUTED;
 
             // Get environment current at the point of class definition.
-            Env<AttrContext> env = enter.typeEnvs.get(c);
+            Env<AttrContext> env = typeEnvs.get(c);
 
-            // The info.lint field in the envs stored in enter.typeEnvs is deliberately uninitialized,
+            // The info.lint field in the envs stored in typeEnvs is deliberately uninitialized,
             // because the annotations were not available at the time the env was created. Therefore,
             // we look up the environment chain for the first enclosing environment for which the
             // lint value is set. Typically, this is the parent env, but might be further if there
@@ -4671,16 +4686,30 @@ public class Attr extends JCTree.Visitor {
         private void initTypeIfNeeded(JCTree that) {
             if (that.type == null) {
                 if (that.hasTag(METHODDEF)) {
-                    that.type = dummyMethodType();
+                    that.type = dummyMethodType((JCMethodDecl)that);
                 } else {
                     that.type = syms.unknownType;
                 }
             }
         }
 
+        /* Construct a dummy method type. If we have a method declaration,
+         * and the declared return type is void, then use that return type
+         * instead of UNKNOWN to avoid spurious error messages in lambda
+         * bodies (see:JDK-8041704).
+         */
+        private Type dummyMethodType(JCMethodDecl md) {
+            Type restype = syms.unknownType;
+            if (md != null && md.restype.hasTag(TYPEIDENT)) {
+                JCPrimitiveTypeTree prim = (JCPrimitiveTypeTree)md.restype;
+                if (prim.typetag == VOID)
+                    restype = syms.voidType;
+            }
+            return new MethodType(List.<Type>nil(), restype,
+                                  List.<Type>nil(), syms.methodClass);
+        }
         private Type dummyMethodType() {
-            return new MethodType(List.<Type>nil(), syms.unknownType,
-                            List.<Type>nil(), syms.methodClass);
+            return dummyMethodType(null);
         }
 
         @Override

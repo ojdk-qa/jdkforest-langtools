@@ -531,8 +531,8 @@ public class Check {
 
     Type checkType(final DiagnosticPosition pos, final Type found, final Type req, final CheckContext checkContext) {
         final Infer.InferenceContext inferenceContext = checkContext.inferenceContext();
-        if (inferenceContext.free(req)) {
-            inferenceContext.addFreeTypeListener(List.of(req), new FreeTypeListener() {
+        if (inferenceContext.free(req) || inferenceContext.free(found)) {
+            inferenceContext.addFreeTypeListener(List.of(req, found), new FreeTypeListener() {
                 @Override
                 public void typesInferred(InferenceContext inferenceContext) {
                     checkType(pos, inferenceContext.asInstType(found), inferenceContext.asInstType(req), checkContext);
@@ -618,10 +618,10 @@ public class Check {
          if (a.isUnbound()) {
              return true;
          } else if (!a.hasTag(WILDCARD)) {
-             a = types.upperBound(a);
+             a = types.cvarUpperBound(a);
              return types.isSubtype(a, bound);
          } else if (a.isExtendsBound()) {
-             return types.isCastable(bound, types.upperBound(a), types.noWarnings);
+             return types.isCastable(bound, types.wildUpperBound(a), types.noWarnings);
          } else if (a.isSuperBound()) {
              return !types.notSoftSubtype(types.wildLowerBound(a), bound);
          }
@@ -1038,7 +1038,9 @@ public class Check {
 
         switch (sym.kind) {
         case VAR:
-            if (sym.owner.kind != TYP)
+            if (TreeInfo.isReceiverParam(tree))
+                mask = ReceiverParamFlags;
+            else if (sym.owner.kind != TYP)
                 mask = LocalVarFlags;
             else if ((sym.owner.flags_field & INTERFACE) != 0)
                 mask = implicit = InterfaceVarFlags;
@@ -1813,6 +1815,11 @@ public class Check {
                                             Type t1,
                                             Type t2,
                                             Type site) {
+        if ((site.tsym.flags() & COMPOUND) != 0) {
+            // special case for intersections: need to eliminate wildcards in supertypes
+            t1 = types.capture(t1);
+            t2 = types.capture(t2);
+        }
         return firstIncompatibility(pos, t1, t2, site) == null;
     }
 
@@ -2672,7 +2679,7 @@ public class Check {
                 checkClassBounds(pos, seensofar, it);
             }
             Type st = types.supertype(type);
-            if (st != null) checkClassBounds(pos, seensofar, st);
+            if (st != Type.noType) checkClassBounds(pos, seensofar, st);
         }
 
     /** Enter interface into into set.

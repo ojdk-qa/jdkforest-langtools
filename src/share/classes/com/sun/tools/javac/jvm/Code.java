@@ -1925,6 +1925,13 @@ public class Code {
             return aliveRanges.isEmpty() ? null : aliveRanges.get(aliveRanges.size() - 1);
         }
 
+        void removeLastRange() {
+            Range lastRange = lastRange();
+            if (lastRange != null) {
+                aliveRanges.remove(lastRange);
+            }
+        }
+
         @Override
         public String toString() {
             if (aliveRanges == null) {
@@ -1946,18 +1953,16 @@ public class Code {
             }
         }
 
-        public void closeRange(char end) {
-            if (isLastRangeInitialized()) {
+        public void closeRange(char length) {
+            if (isLastRangeInitialized() && length > 0) {
                 Range range = lastRange();
                 if (range != null) {
                     if (range.length == Character.MAX_VALUE) {
-                        range.length = end;
+                        range.length = length;
                     }
                 }
             } else {
-                if (!aliveRanges.isEmpty()) {
-                    aliveRanges.remove(aliveRanges.size() - 1);
-                }
+                removeLastRange();
             }
         }
 
@@ -1965,16 +1970,14 @@ public class Code {
             if (aliveRanges.isEmpty()) {
                 return false;
             }
-            Range range = lastRange();
-            return range.length == Character.MAX_VALUE;
+            return lastRange().length == Character.MAX_VALUE;
         }
 
         public boolean isLastRangeInitialized() {
             if (aliveRanges.isEmpty()) {
                 return false;
             }
-            Range range = lastRange();
-            return range.start_pc != Character.MAX_VALUE;
+            return lastRange().start_pc != Character.MAX_VALUE;
         }
 
         public Range getWidestRange() {
@@ -2019,7 +2022,7 @@ public class Code {
                 }
                 if (localVar.sym == aliveLocal && localVar.lastRange() != null) {
                     char length = (char)(closingCP - localVar.lastRange().start_pc);
-                    if (length > 0 && length < Character.MAX_VALUE) {
+                    if (length < Character.MAX_VALUE) {
                         localVar.closeRange(length);
                     }
                 }
@@ -2090,12 +2093,12 @@ public class Code {
             lvar[adr].isLastRangeInitialized()) {
             LocalVar v = lvar[adr];
             char length = (char)(curCP() - v.lastRange().start_pc);
-            if (length > 0 && length < Character.MAX_VALUE) {
+            if (length < Character.MAX_VALUE) {
                 lvar[adr] = v.dup();
                 v.closeRange(length);
                 putVar(v);
             } else {
-                v.lastRange().start_pc = Character.MAX_VALUE;
+                v.removeLastRange();
             }
         }
     }

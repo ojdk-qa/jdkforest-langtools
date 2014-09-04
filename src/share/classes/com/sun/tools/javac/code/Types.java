@@ -122,60 +122,56 @@ public class Types {
     }
     // </editor-fold>
 
-    // <editor-fold defaultstate="collapsed" desc="upperBound">
-    /**
-     * The "rvalue conversion".<br>
-     * The upper bound of most types is the type
-     * itself.  Wildcards, on the other hand have upper
-     * and lower bounds.
-     * @param t a type
-     * @return the upper bound of the given type
-     */
-    public Type upperBound(Type t) {
-        return upperBound.visit(t).unannotatedType();
-    }
-    // where
-        private final MapVisitor<Void> upperBound = new MapVisitor<Void>() {
+     // <editor-fold defaultstate="collapsed" desc="bounds">
+     /**
+      * Get a wildcard's upper bound, returning non-wildcards unchanged.
+      * @param t a type argument, either a wildcard or a type
+      */
+     public Type wildUpperBound(Type t) {
+         if (t.hasTag(WILDCARD)) {
+             WildcardType w = (WildcardType) t.unannotatedType();
+             if (w.isSuperBound())
+                 return w.bound == null ? syms.objectType : w.bound.bound;
+             else
+                 return wildUpperBound(w.type);
+         }
+         else return t.unannotatedType();
+     }
 
-            @Override
-            public Type visitWildcardType(WildcardType t, Void ignored) {
-                if (t.isSuperBound())
-                    return t.bound == null ? syms.objectType : t.bound.bound;
-                else
-                    return visit(t.type);
-            }
+     /**
+      * Get a capture variable's upper bound, returning other types unchanged.
+      * @param t a type
+      */
+     public Type cvarUpperBound(Type t) {
+         if (t.hasTag(TYPEVAR)) {
+             TypeVar v = (TypeVar) t.unannotatedType();
+             return v.isCaptured() ? cvarUpperBound(v.bound) : v;
+         }
+         else return t.unannotatedType();
+     }
 
-            @Override
-            public Type visitCapturedType(CapturedType t, Void ignored) {
-                return visit(t.bound);
-            }
-        };
-    // </editor-fold>
-
-    // <editor-fold defaultstate="collapsed" desc="wildLowerBound">
     /**
      * Get a wildcard's lower bound, returning non-wildcards unchanged.
      * @param t a type argument, either a wildcard or a type
      */
     public Type wildLowerBound(Type t) {
         if (t.hasTag(WILDCARD)) {
-            WildcardType w = (WildcardType) t;
+            WildcardType w = (WildcardType) t.unannotatedType();
             return w.isExtendsBound() ? syms.botType : wildLowerBound(w.type);
         }
-        else return t;
+        else return t.unannotatedType();
     }
-    // </editor-fold>
 
-    // <editor-fold defaultstate="collapsed" desc="cvarLowerBound">
     /**
      * Get a capture variable's lower bound, returning other types unchanged.
      * @param t a type
      */
     public Type cvarLowerBound(Type t) {
-        if (t.hasTag(TYPEVAR) && ((TypeVar) t).isCaptured()) {
-            return cvarLowerBound(t.getLowerBound());
+        if (t.hasTag(TYPEVAR)) {
+            TypeVar v = (TypeVar) t.unannotatedType();
+            return v.isCaptured() ? cvarLowerBound(v.getLowerBound()) : v;
         }
-        else return t;
+        else return t.unannotatedType();
     }
     // </editor-fold>
 
@@ -633,7 +629,7 @@ public class Types {
      * (ii) perform functional interface bridge calculation.
      */
     public ClassSymbol makeFunctionalInterfaceClass(Env<AttrContext> env, Name name, List<Type> targets, long cflags) {
-        if (targets.isEmpty() || !isFunctionalInterface(targets.head)) {
+        if (targets.isEmpty()) {
             return null;
         }
         Symbol descSym = findDescriptorSymbol(targets.head.tsym);
@@ -904,7 +900,7 @@ public class Types {
                                              syms.boundClass);
                         changed = true;
                     } else if (s != orig) {
-                        s = new WildcardType(upperBound(s),
+                        s = new WildcardType(wildUpperBound(s),
                                              BoundKind.EXTENDS,
                                              syms.boundClass);
                         changed = true;
@@ -1113,7 +1109,7 @@ public class Types {
                         //check that u == t, where u has been set by Type.withTypeVar
                         return s.isSuperBound() &&
                                 !s.isExtendsBound() &&
-                                visit(t, upperBound(s));
+                                visit(t, wildUpperBound(s));
                     }
                 }
                 default:
@@ -1140,7 +1136,7 @@ public class Types {
                     return visit(s, t);
 
                 if (s.isSuperBound() && !s.isExtendsBound())
-                    return visit(t, upperBound(s)) && visit(t, wildLowerBound(s));
+                    return visit(t, wildUpperBound(s)) && visit(t, wildLowerBound(s));
 
                 if (t.isCompound() && s.isCompound()) {
                     if (!visit(supertype(t), supertype(s)))
@@ -1226,13 +1222,34 @@ public class Types {
         TypeRelation isSameTypeLoose = new LooseSameTypeVisitor();
 
         private class LooseSameTypeVisitor extends SameTypeVisitor {
+
+            /** cache of the type-variable pairs being (recursively) tested. */
+            private Set<TypePair> cache = new HashSet<>();
+
             @Override
             boolean sameTypeVars(TypeVar tv1, TypeVar tv2) {
-                return tv1.tsym == tv2.tsym && visit(tv1.getUpperBound(), tv2.getUpperBound());
+                return tv1.tsym == tv2.tsym && checkSameBounds(tv1, tv2);
             }
             @Override
             protected boolean containsTypes(List<Type> ts1, List<Type> ts2) {
                 return containsTypeEquivalent(ts1, ts2);
+            }
+
+            /**
+             * Since type-variable bounds can be recursive, we need to protect against
+             * infinite loops - where the same bounds are checked over and over recursively.
+             */
+            private boolean checkSameBounds(TypeVar tv1, TypeVar tv2) {
+                TypePair p = new TypePair(tv1, tv2, true);
+                if (cache.add(p)) {
+                    try {
+                        return visit(tv1.getUpperBound(), tv2.getUpperBound());
+                    } finally {
+                        cache.remove(p);
+                    }
+                } else {
+                    return false;
+                }
             }
         };
 
@@ -1288,9 +1305,10 @@ public class Types {
                 UndetVar undetvar = (UndetVar)t;
                 WildcardType wt = (WildcardType)s.unannotatedType();
                 switch(wt.kind) {
-                    case UNBOUND: //similar to ? extends Object
+                    case UNBOUND:
+                        break;
                     case EXTENDS: {
-                        Type bound = upperBound(s);
+                        Type bound = wildUpperBound(s);
                         undetvar.addBound(InferenceBound.UPPER, bound, this);
                         break;
                     }
@@ -1351,28 +1369,6 @@ public class Types {
     // where
         private TypeRelation containsType = new TypeRelation() {
 
-            private Type U(Type t) {
-                while (t.hasTag(WILDCARD)) {
-                    WildcardType w = (WildcardType)t.unannotatedType();
-                    if (w.isSuperBound())
-                        return w.bound == null ? syms.objectType : w.bound.bound;
-                    else
-                        t = w.type;
-                }
-                return t;
-            }
-
-            private Type L(Type t) {
-                while (t.hasTag(WILDCARD)) {
-                    WildcardType w = (WildcardType)t.unannotatedType();
-                    if (w.isExtendsBound())
-                        return syms.botType;
-                    else
-                        t = w.type;
-                }
-                return t;
-            }
-
             public Boolean visitType(Type t, Type s) {
                 if (s.isPartial())
                     return containedBy(s, t);
@@ -1384,13 +1380,13 @@ public class Types {
 //                System.err.println();
 //                System.err.format(" does %s contain %s?%n", t, s);
 //                System.err.format(" %s U(%s) <: U(%s) %s = %s%n",
-//                                  upperBound(s), s, t, U(t),
+//                                  wildUpperBound(s), s, t, wildUpperBound(t),
 //                                  t.isSuperBound()
-//                                  || isSubtypeNoCapture(upperBound(s), U(t)));
+//                                  || isSubtypeNoCapture(wildUpperBound(s), wildUpperBound(t)));
 //                System.err.format(" %s L(%s) <: L(%s) %s = %s%n",
-//                                  L(t), t, s, wildLowerBound(s),
+//                                  wildLowerBound(t), t, s, wildLowerBound(s),
 //                                  t.isExtendsBound()
-//                                  || isSubtypeNoCapture(L(t), wildLowerBound(s)));
+//                                  || isSubtypeNoCapture(wildLowerBound(t), wildLowerBound(s)));
 //                System.err.println();
 //            }
 
@@ -1401,9 +1397,11 @@ public class Types {
                 else {
 //                    debugContainsType(t, s);
                     return isSameWildcard(t, s)
+                        || t.type == s
                         || isCaptureOf(s, t)
-                        || ((t.isExtendsBound() || isSubtypeNoCapture(L(t), wildLowerBound(s))) &&
-                            (t.isSuperBound() || isSubtypeNoCapture(upperBound(s), U(t))));
+                        || ((t.isExtendsBound() || isSubtypeNoCapture(wildLowerBound(t), cvarLowerBound(wildLowerBound(s)))) &&
+                            // TODO: JDK-8039214, cvarUpperBound call here is incorrect
+                            (t.isSuperBound() || isSubtypeNoCapture(cvarUpperBound(wildUpperBound(s)), wildUpperBound(t))));
                 }
             }
 
@@ -1521,7 +1519,7 @@ public class Types {
 
             @Override
             public Boolean visitWildcardType(WildcardType t, Type s) {
-                return isCastable(upperBound(t), s, warnStack.head);
+                return isCastable(wildUpperBound(t), s, warnStack.head);
             }
 
             @Override
@@ -1762,12 +1760,12 @@ public class Types {
 
                 if (t.isExtendsBound()) {
                     if (s.isExtendsBound())
-                        return !isCastableRecursive(t.type, upperBound(s));
+                        return !isCastableRecursive(t.type, wildUpperBound(s));
                     else if (s.isSuperBound())
                         return notSoftSubtypeRecursive(wildLowerBound(s), t.type);
                 } else if (t.isSuperBound()) {
                     if (s.isExtendsBound())
-                        return notSoftSubtypeRecursive(t.type, upperBound(s));
+                        return notSoftSubtypeRecursive(t.type, wildUpperBound(s));
                 }
                 return false;
             }
@@ -1803,7 +1801,7 @@ public class Types {
                                noWarnings);
         }
         if (!s.hasTag(WILDCARD))
-            s = upperBound(s);
+            s = cvarUpperBound(s);
 
         return !isSubtype(t, relaxBound(s));
     }
@@ -1860,7 +1858,7 @@ public class Types {
     // <editor-fold defaultstate="collapsed" desc="Array Utils">
     public boolean isArray(Type t) {
         while (t.hasTag(WILDCARD))
-            t = upperBound(t);
+            t = wildUpperBound(t);
         return t.hasTag(ARRAY);
     }
 
@@ -1870,7 +1868,7 @@ public class Types {
     public Type elemtype(Type t) {
         switch (t.getTag()) {
         case WILDCARD:
-            return elemtype(upperBound(t));
+            return elemtype(wildUpperBound(t));
         case ARRAY:
             t = t.unannotatedType();
             return ((ArrayType)t).elemtype;
@@ -2073,7 +2071,7 @@ public class Types {
 
             @Override
             public Type visitWildcardType(WildcardType t, Symbol sym) {
-                return memberType(upperBound(t), sym);
+                return memberType(wildUpperBound(t), sym);
             }
 
             @Override
@@ -2192,7 +2190,7 @@ public class Types {
 
             @Override
             public Type visitWildcardType(WildcardType t, Boolean recurse) {
-                return erasure(upperBound(t), recurse);
+                return erasure(wildUpperBound(t), recurse);
             }
 
             @Override
@@ -2304,7 +2302,7 @@ public class Types {
             public Type visitType(Type t, Void ignored) {
                 // A note on wildcards: there is no good way to
                 // determine a supertype for a super bounded wildcard.
-                return null;
+                return Type.noType;
             }
 
             @Override
@@ -2401,8 +2399,7 @@ public class Types {
                         if (t.hasErasedSupertypes()) {
                             t.interfaces_field = erasureRecursive(interfaces);
                         } else if (formals.nonEmpty()) {
-                            t.interfaces_field =
-                                upperBounds(subst(interfaces, formals, actuals));
+                            t.interfaces_field = subst(interfaces, formals, actuals);
                         }
                         else {
                             t.interfaces_field = interfaces;
@@ -2472,7 +2469,7 @@ public class Types {
             return false;
         return
             t.isRaw() ||
-            supertype(t) != null && isDerivedRaw(supertype(t)) ||
+            supertype(t) != Type.noType && isDerivedRaw(supertype(t)) ||
             isDerivedRaw(interfaces(t));
     }
 
@@ -2959,6 +2956,12 @@ public class Types {
         }
 
         @Override
+        public Type visitUndetVar(UndetVar t, Void ignored) {
+            //do nothing - we should not replace inside undet variables
+            return t;
+        }
+
+        @Override
         public Type visitClassType(ClassType t, Void ignored) {
             if (!t.isCompound()) {
                 List<Type> typarams = t.getTypeArguments();
@@ -2971,7 +2974,7 @@ public class Types {
                     return new ClassType(outer1, typarams1, t.tsym);
             } else {
                 Type st = subst(supertype(t));
-                List<Type> is = upperBounds(subst(interfaces(t)));
+                List<Type> is = subst(interfaces(t));
                 if (st == supertype(t) && is == interfaces(t))
                     return t;
                 else
@@ -2988,7 +2991,7 @@ public class Types {
                 return t;
             } else {
                 if (t.isExtendsBound() && bound.isExtendsBound())
-                    bound = upperBound(bound);
+                    bound = wildUpperBound(bound);
                 return new WildcardType(bound, t.kind, syms.boundClass, t.bound);
             }
         }
@@ -3223,6 +3226,7 @@ public class Types {
             return tvar.rank_field;
         }
         case ERROR:
+        case NONE:
             return 0;
         default:
             throw new AssertionError();
@@ -3403,9 +3407,16 @@ public class Types {
         class TypePair {
             final Type t1;
             final Type t2;
+            boolean strict;
+
             TypePair(Type t1, Type t2) {
+                this(t1, t2, false);
+            }
+
+            TypePair(Type t1, Type t2, boolean strict) {
                 this.t1 = t1;
                 this.t2 = t2;
+                this.strict = strict;
             }
             @Override
             public int hashCode() {
@@ -3416,8 +3427,8 @@ public class Types {
                 if (!(obj instanceof TypePair))
                     return false;
                 TypePair typePair = (TypePair)obj;
-                return isSameType(t1, typePair.t1)
-                    && isSameType(t2, typePair.t2);
+                return isSameType(t1, typePair.t1, strict)
+                    && isSameType(t2, typePair.t2, strict);
             }
         }
         Set<TypePair> mergeCache = new HashSet<TypePair>();
@@ -3438,8 +3449,8 @@ public class Types {
                     TypePair pair = new TypePair(c1, c2);
                     Type m;
                     if (mergeCache.add(pair)) {
-                        m = new WildcardType(lub(upperBound(act1.head),
-                                                 upperBound(act2.head)),
+                        m = new WildcardType(lub(wildUpperBound(act1.head),
+                                                 wildUpperBound(act2.head)),
                                              BoundKind.EXTENDS,
                                              syms.boundClass);
                         mergeCache.remove(pair);
@@ -3972,8 +3983,13 @@ public class Types {
                     Si.lower = Ti.getSuperBound();
                     break;
                 }
-                if (Si.bound == Si.lower)
+                Type tmpBound = Si.bound.hasTag(UNDETVAR) ? ((UndetVar)Si.bound).qtype : Si.bound;
+                Type tmpLower = Si.lower.hasTag(UNDETVAR) ? ((UndetVar)Si.lower).qtype : Si.lower;
+                if (!Si.bound.hasTag(ERROR) &&
+                    !Si.lower.hasTag(ERROR) &&
+                    isSameType(tmpBound, tmpLower, false)) {
                     currentS.head = Si.bound;
+                }
             }
             currentA = currentA.tail;
             currentT = currentT.tail;
@@ -4010,16 +4026,6 @@ public class Types {
     // </editor-fold>
 
     // <editor-fold defaultstate="collapsed" desc="Internal utility methods">
-    private List<Type> upperBounds(List<Type> ss) {
-        if (ss.isEmpty()) return ss;
-        Type head = upperBound(ss.head);
-        List<Type> tail = upperBounds(ss.tail);
-        if (head != ss.head || tail != ss.tail)
-            return tail.prepend(head);
-        else
-            return ss;
-    }
-
     private boolean sideCast(Type from, Type to, Warner warn) {
         // We are casting from type $from$ to type $to$, which are
         // non-final unrelated types.  This method
@@ -4176,7 +4182,7 @@ public class Types {
         @Override
         public Void visitWildcardType(WildcardType source, Type target) throws AdaptFailure {
             if (source.isExtendsBound())
-                adaptRecursive(upperBound(source), upperBound(target));
+                adaptRecursive(wildUpperBound(source), wildUpperBound(target));
             else if (source.isSuperBound())
                 adaptRecursive(wildLowerBound(source), wildLowerBound(target));
             return null;
@@ -4193,7 +4199,7 @@ public class Types {
                     val = isSubtype(wildLowerBound(val), wildLowerBound(target))
                         ? target : val;
                 } else if (val.isExtendsBound() && target.isExtendsBound()) {
-                    val = isSubtype(upperBound(val), upperBound(target))
+                    val = isSubtype(wildUpperBound(val), wildUpperBound(target))
                         ? val : target;
                 } else if (!isSameType(val, target)) {
                     throw new AdaptFailure();
@@ -4304,7 +4310,7 @@ public class Types {
         }
 
         public Type visitType(Type t, Void s) {
-            return high ? upperBound(t) : t;
+            return t;
         }
 
         @Override
@@ -4702,7 +4708,7 @@ public class Types {
                 assembleClassSig(rawOuter
                         ? types.erasure(outer)
                         : outer);
-                append('.');
+                append(rawOuter ? '$' : '.');
                 Assert.check(c.flatname.startsWith(c.owner.enclClass().flatname));
                 append(rawOuter
                         ? c.flatname.subName(c.owner.enclClass().flatname.getByteLength() + 1, c.flatname.getByteLength())
