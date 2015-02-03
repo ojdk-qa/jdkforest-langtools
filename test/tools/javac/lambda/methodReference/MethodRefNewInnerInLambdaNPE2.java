@@ -1,12 +1,10 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * published by the Free Software Foundation.
  *
  * This code is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
@@ -24,12 +22,36 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8044737
+ * @summary Lambda: NPE while obtaining method reference through lambda expression
+ * @compile MethodRefNewInnerInLambdaNPE2.java
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+public class MethodRefNewInnerInLambdaNPE2 {
+
+    interface Constructor {
+        MyTest execute();
+    }
+
+    class MyTest {
+        MyTest() { System.out.println("Constructor executed"); }
+    }
+
+    public Constructor getConstructor() {
+        return getConstructor(() -> { return MyTest::new; });
+    }
+
+    public static void main(String argv[]) {
+        MethodRefNewInnerInLambdaNPE2 t = new MethodRefNewInnerInLambdaNPE2();
+        MyTest mytest = t.getConstructor().execute();
+    }
+
+    Constructor getConstructor(Wrapper arg) {
+        return arg.unwrap();
+    }
+
+    interface Wrapper {
+        Constructor unwrap();
+    }
+}

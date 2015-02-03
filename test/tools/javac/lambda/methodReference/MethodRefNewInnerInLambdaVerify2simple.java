@@ -1,12 +1,10 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * published by the Free Software Foundation.
  *
  * This code is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
@@ -24,12 +22,29 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8038776
+ * @summary VerifyError when running successfully compiled java class
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+import java.util.function.Function;
+
+/**
+ * Derived from code by:
+ * @author Yawkat
+ */
+public class MethodRefNewInnerInLambdaVerify2simple {
+    public static void main(String[] args) { new MethodRefNewInnerInLambdaVerify2simple().runTest(); }
+
+    private void runTest() {
+        Runnable r = (() -> { Sup w = SomeClass::new; } );
+    }
+
+    private class SomeClass {
+        SomeClass() {  }
+    }
+}
+
+interface Sup {
+  Object get();
+}

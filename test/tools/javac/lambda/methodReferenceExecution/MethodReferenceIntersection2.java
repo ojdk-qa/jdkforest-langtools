@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,45 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8058112
+ * @summary Invalid BootstrapMethod for constructor/method reference
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+import java.util.function.Function;
+
+public class MethodReferenceIntersection2 {
+
+    interface B { }
+
+    interface A { }
+
+    static class C implements A, B { }
+
+    static class Info {
+        <H extends A & B> Info(H h) { }
+
+        static <H extends A & B> Info info(H h) {
+            return new Info(h);
+        }
+    }
+
+    public static void main(String[] args) {
+        test();
+    }
+
+    // Note the switch in order compared to that on Info
+    static <H extends B & A> void test() {
+        Function<H, Info> f1L = _h -> new Info(_h);
+        Function<H, Info> f1 = Info::new;
+        Function<H, Info> f2L = _h -> Info.info(_h);
+        Function<H, Info> f2 = Info::info;
+        H c = (H) new C();
+        if(f1.apply(c) instanceof Info &&
+           f2.apply(c) instanceof Info) {
+           System.out.println("Passes.");
+        } else {
+           throw new AssertionError();
+        }
+    }
+}

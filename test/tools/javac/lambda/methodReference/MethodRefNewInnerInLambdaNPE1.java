@@ -1,12 +1,10 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * published by the Free Software Foundation.
  *
  * This code is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
@@ -24,12 +22,27 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8037404
+ * @summary javac NPE or VerifyError for code with constructor reference of inner class
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+public class MethodRefNewInnerInLambdaNPE1 {
+    public static void main(String[] args) {
+        if (new MethodRefNewInnerInLambdaNPE1().getList().get().getClass() != TT.class)
+            throw new AssertionError("sanity failed");
+    }
+
+    Supplier<TT> getList() {
+        return () -> Stream.of(1).map(TT::new).findFirst().get();
+    }
+
+    class TT {
+        public TT(int i) {
+
+        }
+    }
+}

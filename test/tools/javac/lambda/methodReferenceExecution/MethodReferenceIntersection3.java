@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,27 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8058112
+ * @summary Invalid BootstrapMethod for constructor/method reference
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+/**
+ * @author Remi Forax
+ */
+
+public class MethodReferenceIntersection3 {
+  interface A {}
+
+  interface Foo {
+    <T extends Object & A> void foo(T t);
+  }
+
+  static <T extends A> void bar(T t) {
+  }
+
+  public static void main(String[] args) {
+    Foo foo = MethodReferenceIntersection3::bar;
+    foo.foo(new A(){});
+  }
+}

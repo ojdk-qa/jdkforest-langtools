@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,31 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
+ * @test
+ * @bug 8048121
+ * @summary javac complex method references: revamp and simplify
  *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * Make sure NPE check is done even in the convert to Lambda case
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+public class MethodReferenceComplexNullCheckTest {
+    public static void main(String[] args) {
+        F fr = null;
+        boolean npeFired = false;
+        try {
+            IForm frf = fr::doit;
+        } catch (NullPointerException npe) {
+            npeFired = true;
+        } finally {
+            if (!npeFired) throw new AssertionError( "NPE should have been thrown");
+        }
+    }
+
+    interface IForm {
+       void xyz(Object... args);
+    }
+
+    class F {
+       private void doit(Object... args) { }
+    }
+}

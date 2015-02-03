@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,12 +24,16 @@
  */
 
 /**
- * Provides interfaces to represent documentation comments as abstract syntax
- * trees (AST).
- *
- * @author Jonathan Gibbons
- * @since 1.8
- * @see <a href="https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags">https://docs.oracle.com/javase/6/docs/technotes/tools/solaris/javadoc.html#javadoctags</a>
+ * @test
+ * @bug 8057800
+ * @summary Method reference with generic type creates NPE when compiling
+ * @compile NPEMethodReferenceAndGenericsTest.java
  */
-@jdk.Exported
-package com.sun.source.doctree;
+
+public class NPEMethodReferenceAndGenericsTest {
+    public <T> void foo(java.util.Comparator<? super T> comparator) {}
+
+    public <C extends Comparable<? super C>> void foo() {
+        foo(C::compareTo);
+    }
+}
